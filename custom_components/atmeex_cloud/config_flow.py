@@ -5,8 +5,8 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigFlow
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 
-from .const import DOMAIN, CONF_ACCESS_TOKEN, CONF_REFRESH_TOKEN
-from .api import AtmeexApi  # <— вместо atmeexpy
+from .const import DOMAIN
+from .api import AtmeexApi
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,17 +27,14 @@ class AtmeexConfigFlow(ConfigFlow, domain=DOMAIN):
             await api.async_init()
             try:
                 await api.login(user_input[CONF_EMAIL], user_input[CONF_PASSWORD])
-                # sanity-check
-                await api.list_devices()
+                # sanity-check запросим список устройств
+                await api.get_devices()
             except Exception as exc:
-                _LOGGER.exception("Login/list_devices failed")
+                _LOGGER.exception("Login/devices failed")
                 errors["base"] = "cannot_connect"
             else:
-                # если у тебя есть доступ к токенам — можно сохранить:
-                # user_input[CONF_ACCESS_TOKEN] = getattr(api.auth, "_access_token", None)
-                # user_input[CONF_REFRESH_TOKEN] = getattr(api.auth, "_refresh_token", None)
                 return self.async_create_entry(
-                    title=user_input[CONF_EMAIL],
+                    title=user_input.get(CONF_EMAIL),
                     data=user_input,
                 )
             finally:
