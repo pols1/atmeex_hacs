@@ -1,3 +1,5 @@
 {
-    "name": "Atmeex cloud"
+  "name": "Atmeex Cloud",
+  "render_readme": true,
+  "homeassistant": "2024.8.0"
 }
