@@ -1,63 +1,48 @@
-from __future__ import annotations
-import logging
-
-from homeassistant.components.climate import ClimateEntity, HVACMode, ClimateEntityFeature
-from homeassistant.const import UnitOfTemperature, ATTR_TEMPERATURE
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.components.climate import (
+    ClimateEntity,
+    ClimateEntityFeature,
+    HVACMode,
+)
+from homeassistant.const import TEMP_CELSIUS
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from . import AtmeexCoordinator
-from .const import DOMAIN
-
-_LOGGER = logging.getLogger(__name__)
-
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
-    coordinator: AtmeexCoordinator = hass.data[DOMAIN][entry.entry_id]
-    entities: list[AtmeexClimate] = []
-    for dev in coordinator.devices:
-        did = str(dev.get("id") or dev.get("device_id") or "")
-        if not did:
-            continue
-        name = dev.get("name") or did
-        entities.append(AtmeexClimate(coordinator, did, name))
-    async_add_entities(entities)
-
 class AtmeexClimate(CoordinatorEntity, ClimateEntity):
-    _attr_has_entity_name = True
+    _attr_hvac_modes = [HVACMode.HEAT, HVACMode.OFF]
     _attr_supported_features = ClimateEntityFeature.TARGET_TEMPERATURE
-    _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT]  # при необходимости дополним
-    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    _attr_temperature_unit = TEMP_CELSIUS
+    _attr_min_temp = 10
+    _attr_max_temp = 30
 
-    def __init__(self, coordinator: AtmeexCoordinator, device_id: str, name: str):
+    def __init__(self, coordinator, api, device):
         super().__init__(coordinator)
-        self.api = coordinator.api
-        self._device_id = device_id
-        self._attr_name = f"{name} climate"
-        self._attr_unique_id = f"{device_id}_climate"
+        self.api = api
+        self._device_id = device["id"]
+        self._attr_name = device["name"]
+
+    @property
+    def condition(self):
+        return self.coordinator.data["states"].get(str(self._device_id), {})
 
     @property
     def hvac_mode(self):
-        st = self.coordinator.data.get("states", {}).get(self._device_id, {})
-        return HVACMode.HEAT if st.get("power") else HVACMode.OFF
+        return HVACMode.HEAT if self.condition.get("pwr_on") else HVACMode.OFF
 
-    async def async_set_hvac_mode(self, hvac_mode: HVACMode):
+    async def async_set_hvac_mode(self, hvac_mode):
         await self.api.set_power(self._device_id, hvac_mode != HVACMode.OFF)
         await self.coordinator.async_request_refresh()
 
     @property
     def current_temperature(self):
-        st = self.coordinator.data.get("states", {}).get(self._device_id, {})
-        return st.get("temperature")
+        t = self.condition.get("temp_room")
+        return t / 10 if t else None
 
     @property
     def target_temperature(self):
-        st = self.coordinator.data.get("states", {}).get(self._device_id, {})
-        return st.get("target_temperature")
+        t = self.condition.get("u_temp_room")
+        return t / 10 if t else None
 
     async def async_set_temperature(self, **kwargs):
-        target = kwargs.get(ATTR_TEMPERATURE)
-        if target is None:
-            return
-        # TODO: реализовать вызов API на установку цели, если поддерживается
-        await self.coordinator.async_request_refresh()
+        temp = kwargs.get("temperature")
+        if temp is not None:
+            await self.api.set_target_temperature(self._device_id, temp)
+            await self.coordinator.async_request_refresh()
