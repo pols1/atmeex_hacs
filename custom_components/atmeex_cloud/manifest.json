@@ -3,8 +3,9 @@
   "name": "Atmeex cloud",
   "dependencies": [],
   "documentation": "http://github.com/pols/atmeex_hacs",
+  "requirements": ["aiohttp>=3.9.0", "async-timeout>=4.0.3"],
+  "version": "0.2.1",
   "codeowners": ["@anpavlov", "@pols"],
   "issue_tracker": "http://github.com/pols/atmeex_hacs/issues",
   "config_flow": true,
-  "version": "0.2.0"
 }
