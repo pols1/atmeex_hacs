@@ -1,13 +1,12 @@
 {
   "domain": "atmeex_cloud",
   "name": "Atmeex cloud",
-  "dependencies": [],
-  "documentation": "http://github.com/anpavlov/atmeex_hacs",
-  "requirements": [
-    "atmeexpy==0.1.0"
-  ],
-  "codeowners": ["@anpavlov"],
-  "issue_tracker": "http://github.com/anpavlov/atmeex_hacs/issues",
+  "version": "0.2.2",
+  "documentation": "http://github.com/pols/atmeex_hacs",
+  "issue_tracker": "http://github.com/pols/atmeex_hacs/issues",
+  "codeowners": ["@anpavlov", "@pols"],
   "config_flow": true,
-  "version": "0.1.0"
+  "requirements": ["aiohttp>=3.9.0", "async-timeout>=4.0.3"],
+  "iot_class": "cloud_polling",
+  "dependencies": []
 }
