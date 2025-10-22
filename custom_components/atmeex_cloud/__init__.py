@@ -1,12 +1,19 @@
+from datetime import timedelta
+import logging
+
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+
 from .api import AtmeexApi, ApiError
 from .const import DOMAIN, PLATFORMS
+
+_LOGGER = logging.getLogger(__name__)  # ← добавляем это
 
 async def async_setup(hass, config):
     hass.data.setdefault(DOMAIN, {})
     return True
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     api = AtmeexApi()
@@ -30,6 +37,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     hass.data[DOMAIN][entry.entry_id] = {"api": api, "coordinator": coordinator}
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
+
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
