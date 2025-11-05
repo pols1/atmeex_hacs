@@ -10,7 +10,6 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class ApiError(Exception):
-    """Ошибки клиента Atmeex API."""
     pass
 
 
@@ -22,17 +21,14 @@ class AtmeexApi:
 
     async def async_init(self) -> None:
         if self._session is None:
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(headers={"Accept": "application/json"})
 
     async def async_close(self) -> None:
         if self._session is not None:
             await self._session.close()
             self._session = None
 
-    # ------------------- AUTH -------------------
-
     async def login(self, email: str, password: str) -> None:
-        """POST /auth/signin {grant_type=basic, email, password} -> access_token."""
         assert self._session is not None
         url = f"{self.base_url}/auth/signin"
         payload = {"grant_type": "basic", "email": email, "password": password}
@@ -43,44 +39,73 @@ class AtmeexApi:
                     _LOGGER.error("Signin failed %s: %s", resp.status, text[:300])
                     raise ApiError(f"Signin failed: {resp.status}")
                 data = await resp.json(content_type=None)
-
         token = data.get("access_token")
         if not token:
             raise ApiError("Auth response missing access_token")
         self._token = token
-        # Обычно «Bearer …». Если сервер вернёт 401 на последующих запросах — заменим на просто токен.
         self._session.headers.update({"Authorization": f"Bearer {token}"})
         _LOGGER.info("Signed in")
 
-    # ------------------- READ -------------------
+    # ---------- helpers ----------
+
+    async def _fetch_json(self, method: str, url: str, **kwargs) -> Any:
+        """Общий помощник: всегда парсим JSON, даже если сервер отдаёт text/html."""
+        assert self._session is not None
+        async with async_timeout.timeout(30):
+            async with self._session.request(method, url, **kwargs) as resp:
+                text = await resp.text()
+                if resp.status >= 400:
+                    raise ApiError(f"{method} {url} failed {resp.status}: {text[:300]}")
+                # Бывает, сервер присылает JSON с неправильным content-type → разбираем вручную
+                try:
+                    return await resp.json(content_type=None)
+                except Exception:
+                    _LOGGER.debug("Non-JSON content-type, trying manual parse for %s", url)
+                    import json as _json
+                    return _json.loads(text)
+
+    # ---------- READ ----------
 
     async def get_devices(self) -> list[dict[str, Any]]:
-        """GET /devices?with_condition=1 -> список устройств с condition внутри."""
-        assert self._session is not None
-        url = f"{self.base_url}/devices?with_condition=1"
-        async with async_timeout.timeout(20):
-            async with self._session.get(url) as resp:
-                text = await resp.text()
-                if resp.status >= 400:
-                    raise ApiError(f"GET /devices failed {resp.status}: {text[:300]}")
-                data = await resp.json(content_type=None)
-        return data if isinstance(data, list) else []
+        """
+        Сначала пытаемся с with_condition=1.
+        Если 500 – падаем на простой /devices и подтягиваем condition через /devices/{id}.
+        """
+        url1 = f"{self.base_url}/devices?with_condition=1"
+        try:
+            data = await self._fetch_json("GET", url1)
+            return data if isinstance(data, list) else []
+        except ApiError as err:
+            # 500 (и прочие серверные) – фолбэк
+            msg = str(err)
+            if "failed 500" in msg or "failed 502" in msg or "failed 503" in msg:
+                _LOGGER.warning("with_condition endpoint failed, fallback to /devices: %s", msg)
+                url2 = f"{self.base_url}/devices"
+                devices = await self._fetch_json("GET", url2)
+                if not isinstance(devices, list):
+                    return []
+                # добираем condition точечно
+                enriched: list[dict[str, Any]] = []
+                for d in devices:
+                    did = d.get("id")
+                    if did is None:
+                        enriched.append(d)
+                        continue
+                    try:
+                        full = await self.get_device(did)
+                        d["condition"] = full.get("condition") or {}
+                    except Exception as e:
+                        _LOGGER.warning("Failed to fetch condition for device %s: %s", did, e)
+                        d.setdefault("condition", {})
+                    enriched.append(d)
+                return enriched
+            # не серверная – пробрасываем дальше
+            raise
 
     async def get_device(self, device_id: int | str) -> dict[str, Any]:
-        """GET /devices/{id}"""
-        assert self._session is not None
         url = f"{self.base_url}/devices/{device_id}"
-        async with async_timeout.timeout(20):
-            async with self._session.get(url) as resp:
-                text = await resp.text()
-                if resp.status >= 400:
-                    raise ApiError(f"GET /devices/{device_id} failed {resp.status}: {text[:300]}")
-                return await resp.json(content_type=None)
-
-    async def get_device_state(self, device_id: int | str) -> dict[str, Any]:
-        """Вернуть condition из /devices/{id} (на случай точечного обновления)."""
-        dev = await self.get_device(device_id)
-        return dev.get("condition") or {}
+        data = await self._fetch_json("GET", url)
+        return data if isinstance(data, dict) else {}
 
     # ------------------- WRITE (params) -------------------
 
