@@ -47,18 +47,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_config_entry_first_refresh()
 
     async def refresh_device(device_id: int | str) -> None:
-        """Принудительно дочитать один девайс и сразу обновить coordinator."""
+        """Дочитать одно устройство и мгновенно обновить данные координатора (write-through)."""
         try:
             full = await api.get_device(device_id)
         except Exception as e:
             _LOGGER.warning("Failed to refresh device %s: %s", device_id, e)
             return
-        # Текущее состояние в координаторе
+
         cur = coordinator.data or {"devices": [], "states": {}}
         devices = list(cur.get("devices", []))
         states = dict(cur.get("states", {}))
 
-        # Обновим devices (заменим элемент по id, либо добавим)
+        # Заменим/добавим устройство в списке
         replaced = False
         for i, d in enumerate(devices):
             if d.get("id") == full.get("id"):
@@ -68,10 +68,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if not replaced:
             devices.append(full)
 
-        # Обновим states
+        # Обновим состояние
         states[str(full.get("id"))] = full.get("condition") or {}
 
-        # Мгновенно протолкнём в UI
+        # Моментально пушим в UI
         coordinator.async_set_updated_data({"devices": devices, "states": states})
 
     hass.data[DOMAIN][entry.entry_id] = {
