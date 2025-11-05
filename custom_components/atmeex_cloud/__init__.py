@@ -8,7 +8,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .api import AtmeexApi
+from .api import AtmeexApi, ApiError
 from .const import DOMAIN, PLATFORMS
 
 _LOGGER = logging.getLogger(__name__)
@@ -24,11 +24,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await api.async_init()
     await api.login(entry.data["email"], entry.data["password"])
 
+    # держим последнее удачное состояние в замыкании
+    last_ok: dict[str, Any] = {"devices": [], "states": {}}
+
     async def _async_update_data() -> dict[str, Any]:
-        devices = await api.get_devices()
-        # condition сразу внутри списка устройств
-        states = {str(d.get("id")): (d.get("condition") or {}) for d in devices if d.get("id") is not None}
-        return {"devices": devices, "states": states}
+        nonlocal last_ok
+        try:
+            devices = await api.get_devices()
+            states = {str(d.get("id")): (d.get("condition") or {}) for d in devices if d.get("id") is not None}
+            last_ok = {"devices": devices, "states": states}
+            return last_ok
+        except Exception as err:
+            # НЕ роняем коорд и не спамим ошибками – отдаём last_ok
+            _LOGGER.warning("Atmeex Cloud update failed, using last known state: %s", err)
+            return last_ok
 
     coordinator = DataUpdateCoordinator(
         hass,
