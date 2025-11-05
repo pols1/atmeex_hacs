@@ -58,7 +58,6 @@ class _BaseSelect(CoordinatorEntity, SelectEntity):
 
 class HumidificationSelect(_BaseSelect):
     _attr_options = HUM_OPTIONS
-    _attr_unique_id: str
 
     def __init__(self, coordinator, api, device_id, name) -> None:
         super().__init__(coordinator, api, device_id, name)
@@ -66,13 +65,11 @@ class HumidificationSelect(_BaseSelect):
 
     @property
     def current_option(self) -> str | None:
-        # condition.hum_stg: 0..3
-        stg = self._cond.get("hum_room")  # ПРИМЕЧАНИЕ: если сервер не отражает u_hum_stg в condition,
-                                          # можно переключиться на 'hum_stg' если такой ключ есть.
-        stg = self._cond.get("hum_stg", stg)  # попытка найти прямой ключ ступени
+        # сервер может отдавать либо hum_stg (0..3), либо только показания влажности hum_room — пробуем оба
+        stg = self._cond.get("hum_stg")
         if isinstance(stg, int) and 0 <= stg <= 3:
             return HUM_OPTIONS[stg] if stg > 0 else "off"
-        # fallback: без данных – не меняем последнее известное
+        # fallback
         return getattr(self, "_attr_current_option", "off")
 
     async def async_select_option(self, option: str) -> None:
@@ -86,7 +83,6 @@ class HumidificationSelect(_BaseSelect):
 
 class BrizerModeSelect(_BaseSelect):
     _attr_options = BRIZER_OPTIONS
-    _attr_unique_id: str
 
     def __init__(self, coordinator, api, device_id, name) -> None:
         super().__init__(coordinator, api, device_id, name)
