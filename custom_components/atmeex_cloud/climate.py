@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable, Optional
 
 from homeassistant.components.climate import (
     ClimateEntity,
@@ -21,9 +21,10 @@ from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
+# 7 скоростей вентилятора
 FAN_MODES = ["1", "2", "3", "4", "5", "6", "7"]
 
-# режим бризера (по condition.damp_pos 0..3)
+# Swing используем как "режим бризера" по condition.damp_pos (0..3)
 BRIZER_SWING_MODES = [
     "приточная вентиляция",  # 0
     "рециркуляция",          # 1
@@ -43,7 +44,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         if did is None:
             continue
         name = dev.get("name") or f"Device {did}"
-        entities.append(AtmeexClimateEntity(coordinator, api, did, name))
+        entities.append(AtmeexClimateEntity(coordinator, api, entry.entry_id, did, name))
 
     if entities:
         async_add_entities(entities)
@@ -51,15 +52,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
 class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
     """
-    Бризер в одном устройстве:
-    - Режимы HVAC: OFF / FAN_ONLY / HEAT (вентиляция и нагрев)
-    - 7 скоростей вентилятора
-    - Цель по температуре (°C) И цель по влажности (%), чтобы в UI был переключатель
-    - Swing-mode = режим бризера (damp_pos 0..3)
+    Бризер "в одном устройстве":
+    - Режимы HVAC: только ВЕНТИЛЯЦИЯ (FAN_ONLY) / ВЫКЛ.
+    - Управление температурой (°C) и влажностью (%) — обе цели есть, на карточке будет переключатель.
+    - 7 скоростей вентилятора.
+    - Swing = режим бризера (damp_pos 0..3).
+    - Статусы читаем всегда из coordinator (который берёт их из API).
     """
 
-    # HVAC
-    _attr_hvac_modes = [HVACMode.OFF, HVACMode.FAN_ONLY, HVACMode.HEAT]
+    # Режимы
+    _attr_hvac_modes = [HVACMode.FAN_ONLY, HVACMode.OFF]
 
     # Температура
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
@@ -72,7 +74,7 @@ class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
     _attr_min_humidity = 0
     _attr_max_humidity = 100
 
-    # Остальные возможности
+    # Возможности
     _attr_fan_modes = FAN_MODES
     _attr_swing_modes = BRIZER_SWING_MODES
     _attr_supported_features = (
@@ -84,9 +86,17 @@ class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
     _attr_icon = "mdi:air-purifier"
     _attr_has_entity_name = True
 
-    def __init__(self, coordinator, api, device_id: int | str, name: str) -> None:
+    def __init__(
+        self,
+        coordinator,
+        api,
+        entry_id: str,
+        device_id: int | str,
+        name: str,
+    ) -> None:
         super().__init__(coordinator)
         self.api = api
+        self._entry_id = entry_id
         self._device_id = device_id
         self._attr_name = name
         self._attr_unique_id = f"{device_id}_climate"
@@ -95,7 +105,7 @@ class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
 
     @property
     def _cond(self) -> dict[str, Any]:
-        """Актуальное состояние из координатора (обновляется с API)."""
+        """Актуальный condition для устройства (после старта уже получен из API)."""
         return self.coordinator.data.get("states", {}).get(str(self._device_id), {}) or {}
 
     @staticmethod
@@ -105,11 +115,12 @@ class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
         s = max(1, min(7, int(speed)))
         return FAN_MODES[s - 1]
 
-    # Маппинг «ступень увлажнения (0..3) ↔ целевая влажность (%)» для UI.
-    # Цели в процентах у API нет, поэтому привязываем проценты к ступеням:
-    #   0 → 0%, 1 → 33%, 2 → 66%, 3 → 100%  (и при установке берём ближайшую ступень)
     @staticmethod
     def _stage_to_target_humidity(stage: int | None) -> int | None:
+        """
+        Маппинг ступени увлажнения (0..3) -> целевая влажность (%),
+        т.к. API оперирует ступенями, а UI — процентом.
+        """
         if stage is None:
             return None
         stage = max(0, min(3, int(stage)))
@@ -117,6 +128,7 @@ class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
 
     @staticmethod
     def _humidity_to_stage(percent: int | float | None) -> int:
+        """Обратный маппинг из процента влажности к ступени 0..3."""
         if percent is None:
             return 0
         try:
@@ -131,32 +143,41 @@ class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
             return 2
         return 3
 
-    # ---------- HVAC ----------
+    @property
+    def _refresh_device_cb(self) -> Optional[Callable[[int | str], Any]]:
+        """Колбэк, который дочитывает одно устройство из API и мгновенно обновляет coordinator."""
+        data = self.hass.data.get(DOMAIN, {}).get(self._entry_id, {})
+        cb = data.get("refresh_device")
+        return cb if callable(cb) else None
+
+    async def _instant_refresh(self) -> None:
+        """Если доступен колбэк — мгновенно дочитаем состояние одного устройства."""
+        cb = self._refresh_device_cb
+        if cb:
+            await cb(self._device_id)
+
+    # ---------- HVAC (только FAN_ONLY / OFF) ----------
 
     @property
     def hvac_mode(self) -> HVACMode:
-        # включён/выключен берём из condition.pwr_on
-        if not bool(self._cond.get("pwr_on")):
-            return HVACMode.OFF
-        # если есть целевая температура — считаем, что режим HEAT,
-        # иначе просто вентиляция (FAN_ONLY)
-        return HVACMode.HEAT if self._cond.get("u_temp_room") is not None else HVACMode.FAN_ONLY
+        # Режим не зависит от наличия целевой температуры — только по питанию
+        return HVACMode.FAN_ONLY if bool(self._cond.get("pwr_on")) else HVACMode.OFF
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         await self.api.set_power(self._device_id, hvac_mode != HVACMode.OFF)
-        await self.coordinator.async_request_refresh()
+        await self._instant_refresh()
 
-    # ---------- температура ----------
+    # ---------- Температура ----------
 
     @property
     def current_temperature(self):
-        # temp_room приходит как deci°C (например 250 = 25.0°C)
+        # temp_room в deci°C (напр. 250 = 25.0°C)
         val = self._cond.get("temp_room")
         return (val / 10) if isinstance(val, (int, float)) else None
 
     @property
     def target_temperature(self):
-        # u_temp_room (deci°C) — целевая температура
+        # u_temp_room в deci°C
         val = self._cond.get("u_temp_room")
         return (val / 10) if isinstance(val, (int, float)) else None
 
@@ -164,14 +185,17 @@ class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
         t = kwargs.get(ATTR_TEMPERATURE)
         if t is None:
             return
+        # Если устройство выключено — включим «Вентиляцию», затем установим цель.
+        if not bool(self._cond.get("pwr_on")):
+            await self.api.set_power(self._device_id, True)
         await self.api.set_target_temperature(self._device_id, float(t))
-        await self.coordinator.async_request_refresh()
+        await self._instant_refresh()
 
-    # ---------- влажность ----------
+    # ---------- Влажность ----------
 
     @property
     def current_humidity(self) -> int | None:
-        # фактическая влажность в помещении (проценты)
+        # Фактическая влажность помещения, %, если отдается
         val = self._cond.get("hum_room")
         if isinstance(val, (int, float)):
             return int(val)
@@ -179,23 +203,22 @@ class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
 
     @property
     def target_humidity(self) -> int | None:
-        # целевая «в процентах» строится по ступени увлажнения
+        # Цель строим по ступени hum_stg (0..3) → 0/33/66/100
         stage = self._cond.get("hum_stg")
         if isinstance(stage, (int, float)):
             return self._stage_to_target_humidity(int(stage))
-        # если сервер не отдаёт hum_stg, попробуем по факту работы насоса (on → 33%)
+        # Fallback: если знаем только факт работы насоса испарителя
         pump = self._cond.get("eva_pump_on")
         if isinstance(pump, bool):
             return 33 if pump else 0
         return 0
 
     async def async_set_humidity(self, humidity: int) -> None:
-        # переводим процент в ближайшую «ступень» 0..3 и отправляем в API как u_hum_stg
         stage = self._humidity_to_stage(humidity)
         await self.api.set_humid_stage(self._device_id, stage)
-        await self.coordinator.async_request_refresh()
+        await self._instant_refresh()
 
-    # ---------- вентилятор ----------
+    # ---------- Вентилятор ----------
 
     @property
     def fan_mode(self) -> str | None:
@@ -212,9 +235,9 @@ class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
             _LOGGER.warning("Unsupported fan_mode %s", fan_mode)
             return
         await self.api.set_fan_speed(self._device_id, speed)
-        await self.coordinator.async_request_refresh()
+        await self._instant_refresh()
 
-    # ---------- swing = режим бризера ----------
+    # ---------- Swing = режим бризера ----------
 
     @property
     def swing_mode(self) -> str | None:
@@ -228,9 +251,9 @@ class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
             _LOGGER.warning("Unsupported swing_mode %s", swing_mode)
             return
         await self.api.set_brizer_mode(self._device_id, BRIZER_SWING_MODES.index(swing_mode))
-        await self.coordinator.async_request_refresh()
+        await self._instant_refresh()
 
-    # ---------- удобный флаг ----------
+    # ---------- Доп. флаг ----------
 
     @property
     def is_on(self) -> bool:
