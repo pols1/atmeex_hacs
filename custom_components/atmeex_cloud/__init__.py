@@ -8,7 +8,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
-from .api import AtmeexApi, ApiError
+from .api import AtmeexApi
 from .const import DOMAIN, PLATFORMS
 
 _LOGGER = logging.getLogger(__name__)
@@ -24,7 +24,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await api.async_init()
     await api.login(entry.data["email"], entry.data["password"])
 
-    # держим последнее удачное состояние в замыкании
     last_ok: dict[str, Any] = {"devices": [], "states": {}}
 
     async def _async_update_data() -> dict[str, Any]:
@@ -35,7 +34,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             last_ok = {"devices": devices, "states": states}
             return last_ok
         except Exception as err:
-            # НЕ роняем коорд и не спамим ошибками – отдаём last_ok
             _LOGGER.warning("Atmeex Cloud update failed, using last known state: %s", err)
             return last_ok
 
@@ -48,7 +46,39 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     await coordinator.async_config_entry_first_refresh()
 
-    hass.data[DOMAIN][entry.entry_id] = {"api": api, "coordinator": coordinator}
+    async def refresh_device(device_id: int | str) -> None:
+        """Принудительно дочитать один девайс и сразу обновить coordinator."""
+        try:
+            full = await api.get_device(device_id)
+        except Exception as e:
+            _LOGGER.warning("Failed to refresh device %s: %s", device_id, e)
+            return
+        # Текущее состояние в координаторе
+        cur = coordinator.data or {"devices": [], "states": {}}
+        devices = list(cur.get("devices", []))
+        states = dict(cur.get("states", {}))
+
+        # Обновим devices (заменим элемент по id, либо добавим)
+        replaced = False
+        for i, d in enumerate(devices):
+            if d.get("id") == full.get("id"):
+                devices[i] = full
+                replaced = True
+                break
+        if not replaced:
+            devices.append(full)
+
+        # Обновим states
+        states[str(full.get("id"))] = full.get("condition") or {}
+
+        # Мгновенно протолкнём в UI
+        coordinator.async_set_updated_data({"devices": devices, "states": states})
+
+    hass.data[DOMAIN][entry.entry_id] = {
+        "api": api,
+        "coordinator": coordinator,
+        "refresh_device": refresh_device,
+    }
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
