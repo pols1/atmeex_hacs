@@ -29,14 +29,16 @@ BRIZER_SWING_MODES = [
     "приточный клапан",      # 3
 ]
 
-# Надписи в выпадающем списке. Чтобы в меню было видно слово "увлажнитель",
-# делаем явные подписи.
-HUM_PRESETS_LABELLED = [
-    "увлажнитель: выкл",     # 0
-    "увлажнитель: низкий",   # 1
-    "увлажнитель: средний",  # 2
-    "увлажнитель: высокий",  # 3
-]
+# Допустимые уровни целевой влажности (для «прилипания» слайдера)
+HUM_ALLOWED = [0, 33, 66, 100]
+
+
+def _quantize_humidity(val: int | float | None) -> int:
+    """Ближайшее из 0/33/66/100."""
+    if val is None:
+        return 0
+    v = max(0, min(100, int(round(val))))
+    return min(HUM_ALLOWED, key=lambda x: abs(x - v))
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities):
@@ -57,9 +59,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
 
 
 class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
-    """Бризер как ClimateEntity: температура, 7 скоростей, режим заслонки, + увлажнитель (как пресет при наличии)."""
+    """
+    Climate: температура, 7 скоростей, режим заслонки, влажность СЛАЙДЕРОМ.
+    Слайдер влажности квантуется в 0/33/66/100 ↔ ступени 0..3 (если увлажнитель есть).
+    """
 
-    # Базовые возможности — без учета увлажнителя (добросим динамически)
     _base_supported = (
         ClimateEntityFeature.TARGET_TEMPERATURE
         | ClimateEntityFeature.FAN_MODE
@@ -67,18 +71,13 @@ class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
     )
 
     _attr_hvac_modes = [HVACMode.FAN_ONLY, HVACMode.OFF]
-
-    # Температура
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_precision = PRECISION_WHOLE
     _attr_target_temperature_step = 0.5
     _attr_min_temp = 10
     _attr_max_temp = 30
-
-    # Фан и заслонка
     _attr_fan_modes = FAN_MODES
     _attr_swing_modes = BRIZER_SWING_MODES
-
     _attr_icon = "mdi:air-purifier"
     _attr_has_entity_name = True
 
@@ -104,11 +103,6 @@ class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
         return self.coordinator.data.get("states", {}).get(str(self._device_id), {}) or {}
 
     def _has_humidifier(self) -> bool:
-        """
-        Признак наличия увлажнителя:
-        - есть hum_stg в condition (нормализованном),
-        - или в настройках был u_hum_stg (через нормализацию попадает в condition).
-        """
         stg = self._cond.get("hum_stg")
         return isinstance(stg, (int, float)) or ("hum_stg" in self._cond)
 
@@ -119,19 +113,19 @@ class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
         if callable(cb):
             await cb(self._device_id)
 
-    # ---------- доступность / онлайн ----------
+    # ---------- доступность ----------
 
     @property
     def available(self) -> bool:
         return bool(self._cond.get("online", True))
 
-    # ---------- Поддерживаемые фичи (динамически) ----------
+    # ---------- поддержка фич ----------
 
     @property
     def supported_features(self) -> int:
         features = self._base_supported
         if self._has_humidifier():
-            features |= ClimateEntityFeature.PRESET_MODE
+            features |= ClimateEntityFeature.TARGET_HUMIDITY
         return features
 
     # ---------- HVAC ----------
@@ -153,8 +147,12 @@ class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
 
     @property
     def target_temperature(self):
+        # Защита от −100: если цели нет, показываем текущую/20.0
         val = self._cond.get("u_temp_room")  # деци-°C (цель)
-        return (val / 10) if isinstance(val, (int, float)) else None
+        if isinstance(val, (int, float)):
+            return val / 10
+        cur = self.current_temperature
+        return cur if isinstance(cur, (int, float)) else 20.0
 
     async def async_set_temperature(self, **kwargs) -> None:
         t = kwargs.get(ATTR_TEMPERATURE)
@@ -165,32 +163,31 @@ class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
         await self.api.set_target_temperature(self._device_id, float(t))
         await self._refresh()
 
-    # ---------- Увлажнитель (как пресет в climate) ----------
+    # ---------- Влажность (слайдер с квантованием) ----------
 
     @property
-    def preset_modes(self) -> list[str] | None:
-        """Показываем выпадающий список увлажнителя только если прибор его поддерживает."""
-        if not self._has_humidifier():
-            return None
-        return HUM_PRESETS_LABELLED
+    def current_humidity(self) -> int | None:
+        """Текущая влажность из датчика."""
+        val = self._cond.get("hum_room")
+        return int(val) if isinstance(val, (int, float)) else None
 
     @property
-    def preset_mode(self) -> str | None:
+    def target_humidity(self) -> int | None:
+        """Показываем одно из 0/33/66/100 (по текущей ступени hum_stg)."""
         if not self._has_humidifier():
             return None
-        stage = self._cond.get("hum_stg")
-        if not isinstance(stage, (int, float)):
-            stage = 0
-        s = max(0, min(3, int(stage)))
-        return HUM_PRESETS_LABELLED[s]
+        stg = self._cond.get("hum_stg")
+        if not isinstance(stg, (int, float)):
+            stg = 0
+        stg = max(0, min(3, int(stg)))
+        return HUM_ALLOWED[stg]
 
-    async def async_set_preset_mode(self, preset_mode: str) -> None:
+    async def async_set_humidity(self, humidity: int) -> None:
+        """Принимаем любое число, квантируем в 0/33/66/100 → ступень 0..3."""
         if not self._has_humidifier():
             return
-        if preset_mode not in HUM_PRESETS_LABELLED:
-            _LOGGER.warning("Unsupported humidifier preset: %s", preset_mode)
-            return
-        stage = HUM_PRESETS_LABELLED.index(preset_mode)  # 0..3
+        q = _quantize_humidity(humidity)
+        stage = HUM_ALLOWED.index(q)  # 0..3
         await self.api.set_humid_stage(self._device_id, stage)
         await self._refresh()
 
@@ -233,13 +230,11 @@ class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
         attrs = dict(self._cond)
-        # дружелюбные поля температуры в °C
         tr = self._cond.get("temp_room")
         ut = self._cond.get("u_temp_room")
         if isinstance(tr, (int, float)):
             attrs["room_temp_c"] = round(tr / 10, 1)
         if isinstance(ut, (int, float)):
             attrs["target_temp_c"] = round(ut / 10, 1)
-        # явный флаг наличия увлажнителя
         attrs["has_humidifier"] = self._has_humidifier()
         return attrs
