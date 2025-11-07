@@ -29,6 +29,7 @@ def _normalize_item(item: dict[str, Any]) -> dict[str, Any]:
     Склеиваем condition + settings → нормализованное состояние:
     - если condition отсутствует/None → создаём из settings (u_*)
     - если condition есть, но частично пустое → дополняем settings
+    - добавляем meta: online
     """
     cond = dict(item.get("condition") or {})
     st = dict(item.get("settings") or {})
@@ -48,7 +49,7 @@ def _normalize_item(item: dict[str, Any]) -> dict[str, Any]:
     if damp is None and "u_damp_pos" in st:
         damp = st.get("u_damp_pos")
 
-    # Цель температуры (деци-градусы)
+    # Цель температуры (деци-°C)
     u_temp = cond.get("u_temp_room")
     if u_temp is None and "u_temp_room" in st:
         u_temp = st.get("u_temp_room")
@@ -58,10 +59,7 @@ def _normalize_item(item: dict[str, Any]) -> dict[str, Any]:
     if hum_stg is None and "u_hum_stg" in st:
         hum_stg = st.get("u_hum_stg")
 
-    out = dict(cond)
-    if not out:
-        out = {}
-
+    out = dict(cond) if cond else {}
     if pwr is not None:
         out["pwr_on"] = bool(pwr)
     if fan is not None:
@@ -84,6 +82,9 @@ def _normalize_item(item: dict[str, Any]) -> dict[str, Any]:
             out["u_temp_room"] = int(u_temp)
         except Exception:
             pass
+
+    # meta: online
+    out["online"] = bool(item.get("online", True))
 
     return out
 
@@ -161,5 +162,5 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id)
+        hass.data[DOMAIN].pop(entry.entry_id, None)
     return unload_ok
