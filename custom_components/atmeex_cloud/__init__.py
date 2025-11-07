@@ -32,7 +32,7 @@ def _normalize_item(item: dict[str, Any]) -> dict[str, Any]:
     pwr_cond = cond.get("pwr_on")
     pwr = _to_bool(pwr_cond) if pwr_cond is not None else _to_bool(st.get("u_pwr_on"))
 
-    # Скорость
+    # Скорость вентилятора
     fan = cond.get("fan_speed")
     u_fan = st.get("u_fan_speed")
     if (fan is None or int(fan) == 0) and pwr and isinstance(u_fan, (int, float)) and int(u_fan) > 0:
@@ -52,6 +52,10 @@ def _normalize_item(item: dict[str, Any]) -> dict[str, Any]:
     hum_stg = cond.get("hum_stg")
     if hum_stg is None and "u_hum_stg" in st:
         hum_stg = st.get("u_hum_stg")
+
+    # Текущие показания
+    hum_room = cond.get("hum_room")
+    temp_room = cond.get("temp_room")
 
     out = dict(cond) if cond else {}
     if pwr is not None:
@@ -76,6 +80,10 @@ def _normalize_item(item: dict[str, Any]) -> dict[str, Any]:
             out["u_temp_room"] = int(u_temp)  # деци-°C
         except Exception:
             pass
+    if isinstance(hum_room, (int, float)):
+        out["hum_room"] = int(hum_room)
+    if isinstance(temp_room, (int, float)):
+        out["temp_room"] = int(temp_room)
 
     # meta
     out["online"] = bool(item.get("online", True))
@@ -90,24 +98,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     last_ok: dict[str, Any] = {"devices": [], "states": {}}
 
     async def _fetch_devices_safely() -> List[dict]:
-        """Пробуем основной список; если пусто/ошибка, делаем фолбэк."""
+        """Основной список; при ошибке/пустоте — fallback и дочитывание по id."""
         try:
-            devices = await api.get_devices()  # желательно ?with_condition=1 внутри api
-            if isinstance(devices, list) and devices:
-                return devices
+            devs = await api.get_devices()
+            if isinstance(devs, list) and devs:
+                return devs
         except Exception as e:
             _LOGGER.debug("get_devices failed: %s", e)
 
-        # фолбэк: без condition
         try:
-            devices = await api.get_devices(fallback=True)  # см. реализацию в api.py
+            devs = await api.get_devices(fallback=True)
         except Exception as e:
             _LOGGER.warning("fallback get_devices failed: %s", e)
-            devices = []
+            devs = []
 
-        # дочитываем condition по каждому id
         result: List[dict] = []
-        for d in devices:
+        for d in devs:
             did = d.get("id")
             if did is None:
                 result.append(d)
@@ -125,15 +131,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         nonlocal last_ok
         try:
             new_devices = await _fetch_devices_safely()
+            new_by_id: Dict[str, dict] = {str(d.get("id")): d for d in new_devices if d.get("id") is not None}
 
-            # строим индекс по id
-            new_by_id: Dict[str, dict] = {}
-            for d in new_devices:
-                did = d.get("id")
-                if did is not None:
-                    new_by_id[str(did)] = d
-
-            # объединяем с прошлым снапшотом, чтобы не терять девайсы
+            # не теряем устройства, пока оффлайн
             for d in last_ok.get("devices", []):
                 did = d.get("id")
                 if did is not None and str(did) not in new_by_id:
@@ -141,7 +141,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
             devices_merged = list(new_by_id.values())
 
-            # нормализация состояний
             states: dict[str, Any] = {}
             for d in devices_merged:
                 did = d.get("id")
@@ -179,7 +178,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         devices = list(cur.get("devices", []))
         states = dict(cur.get("states", {}))
 
-        # заменить/добавить устройство по id
         inserted = True
         for i, d in enumerate(devices):
             if d.get("id") == full.get("id"):
