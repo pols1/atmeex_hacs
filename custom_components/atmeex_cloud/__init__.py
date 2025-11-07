@@ -92,7 +92,8 @@ def _normalize_item(item: dict[str, Any]) -> dict[str, Any]:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    api = AtmeexApi()
+    session = async_get_clientsession(hass)
+    api = AtmeexApi(session)            # <— вместо AtmeexApi()
     await api.async_init()
     await api.login(entry.data["email"], entry.data["password"])
 
