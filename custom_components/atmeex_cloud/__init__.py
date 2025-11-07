@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
-from typing import Any
+from typing import Any, Dict, List
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -15,7 +15,6 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def _to_bool(v: Any) -> bool:
-    """Приведение 0/1/None к bool."""
     if isinstance(v, bool):
         return v
     try:
@@ -25,12 +24,7 @@ def _to_bool(v: Any) -> bool:
 
 
 def _normalize_item(item: dict[str, Any]) -> dict[str, Any]:
-    """
-    Склеиваем condition + settings → нормализованное состояние:
-    - если condition отсутствует/None → создаём из settings (u_*)
-    - если condition есть, но частично пустое → дополняем settings
-    - добавляем meta: online
-    """
+    """Склеить condition + settings → нормализованное состояние (+ online)."""
     cond = dict(item.get("condition") or {})
     st = dict(item.get("settings") or {})
 
@@ -38,13 +32,13 @@ def _normalize_item(item: dict[str, Any]) -> dict[str, Any]:
     pwr_cond = cond.get("pwr_on")
     pwr = _to_bool(pwr_cond) if pwr_cond is not None else _to_bool(st.get("u_pwr_on"))
 
-    # Скорость вентилятора
+    # Скорость
     fan = cond.get("fan_speed")
     u_fan = st.get("u_fan_speed")
     if (fan is None or int(fan) == 0) and pwr and isinstance(u_fan, (int, float)) and int(u_fan) > 0:
         fan = int(u_fan)
 
-    # Заслонка / режим бризера
+    # Заслонка
     damp = cond.get("damp_pos")
     if damp is None and "u_damp_pos" in st:
         damp = st.get("u_damp_pos")
@@ -79,39 +73,87 @@ def _normalize_item(item: dict[str, Any]) -> dict[str, Any]:
             pass
     if u_temp is not None:
         try:
-            out["u_temp_room"] = int(u_temp)
+            out["u_temp_room"] = int(u_temp)  # деци-°C
         except Exception:
             pass
 
-    # meta: online
+    # meta
     out["online"] = bool(item.get("online", True))
-
     return out
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Настройка интеграции Atmeex Cloud."""
     api = AtmeexApi()
     await api.async_init()
     await api.login(entry.data["email"], entry.data["password"])
 
     last_ok: dict[str, Any] = {"devices": [], "states": {}}
 
+    async def _fetch_devices_safely() -> List[dict]:
+        """Пробуем основной список; если пусто/ошибка, делаем фолбэк."""
+        try:
+            devices = await api.get_devices()  # желательно ?with_condition=1 внутри api
+            if isinstance(devices, list) and devices:
+                return devices
+        except Exception as e:
+            _LOGGER.debug("get_devices failed: %s", e)
+
+        # фолбэк: без condition
+        try:
+            devices = await api.get_devices(fallback=True)  # см. реализацию в api.py
+        except Exception as e:
+            _LOGGER.warning("fallback get_devices failed: %s", e)
+            devices = []
+
+        # дочитываем condition по каждому id
+        result: List[dict] = []
+        for d in devices:
+            did = d.get("id")
+            if did is None:
+                result.append(d)
+                continue
+            try:
+                full = await api.get_device(did)
+                result.append(full if isinstance(full, dict) else d)
+            except Exception as e:
+                _LOGGER.debug("get_device(%s) failed: %s", did, e)
+                result.append(d)
+        return result
+
     async def _async_update_data() -> dict[str, Any]:
-        """Плановый опрос всех устройств."""
+        """Плановый опрос: не теряем устройства между опросами."""
         nonlocal last_ok
         try:
-            devices = await api.get_devices()
+            new_devices = await _fetch_devices_safely()
+
+            # строим индекс по id
+            new_by_id: Dict[str, dict] = {}
+            for d in new_devices:
+                did = d.get("id")
+                if did is not None:
+                    new_by_id[str(did)] = d
+
+            # объединяем с прошлым снапшотом, чтобы не терять девайсы
+            for d in last_ok.get("devices", []):
+                did = d.get("id")
+                if did is not None and str(did) not in new_by_id:
+                    new_by_id[str(did)] = d
+
+            devices_merged = list(new_by_id.values())
+
+            # нормализация состояний
             states: dict[str, Any] = {}
-            for d in devices:
+            for d in devices_merged:
                 did = d.get("id")
                 if did is None:
                     continue
                 states[str(did)] = _normalize_item(d)
-            last_ok = {"devices": devices, "states": states}
+
+            last_ok = {"devices": devices_merged, "states": states}
             return last_ok
+
         except Exception as err:
-            _LOGGER.warning("Atmeex Cloud update failed: %s, using last state", err)
+            _LOGGER.warning("Atmeex update failed: %s, using last state", err)
             return last_ok
 
     coordinator = DataUpdateCoordinator(
@@ -137,13 +179,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         devices = list(cur.get("devices", []))
         states = dict(cur.get("states", {}))
 
-        replaced = False
+        # заменить/добавить устройство по id
+        inserted = True
         for i, d in enumerate(devices):
             if d.get("id") == full.get("id"):
                 devices[i] = full
-                replaced = True
+                inserted = False
                 break
-        if not replaced:
+        if inserted:
             devices.append(full)
 
         states[str(full.get("id"))] = cond_norm
