@@ -1,7 +1,7 @@
 {
   "domain": "atmeex_cloud",
   "name": "Atmeex Cloud",
-  "version": "0.3.1",
+  "version": "0.3.4",
   "config_flow": true,
   "documentation": "https://github.com/pols1/atmeex_hacs",
   "issue_tracker": "https://github.com/pols1/atmeex_hacs/issues",
