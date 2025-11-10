@@ -1,4 +1,3 @@
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from __future__ import annotations
 
 import logging
@@ -8,6 +7,7 @@ from typing import Any, Dict, List
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import AtmeexApi
 from .const import DOMAIN, PLATFORMS
@@ -92,8 +92,9 @@ def _normalize_item(item: dict[str, Any]) -> dict[str, Any]:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    # ВАЖНО: берём сессию HA, чтобы не было "Unclosed client session"
     session = async_get_clientsession(hass)
-    api = AtmeexApi(session)            # <— вместо AtmeexApi()
+    api = AtmeexApi(session)
     await api.async_init()
     await api.login(entry.data["email"], entry.data["password"])
 
