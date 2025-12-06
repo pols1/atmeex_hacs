@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -38,7 +39,6 @@ class AtmeexDevice:
             "model": self.model,
             "online": self.online,
             "settings": self.settings,
-            # на будущее — вдруг вернут condition обратно
             "condition": self.raw.get("condition"),
         }
 
@@ -55,13 +55,25 @@ class AtmeexApi:
         self._session = session
         self._email = email
         self._password = password
+
         self._access_token: Optional[str] = None
         self._token_type: str = "Bearer"
+        self._token_expires_at: Optional[float] = None  # unix-time
         self._lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Вспомогательные методы
     # ------------------------------------------------------------------
+
+    def _token_is_valid(self) -> bool:
+        """Проверка, что токен ещё живой."""
+        if not self._access_token:
+            return False
+        if self._token_expires_at is None:
+            # сервер не сказал срок жизни — считаем, что жив, пока не получим ошибку
+            return True
+        # Обновляем токен заранее, за минуту до истечения
+        return time.time() < self._token_expires_at - 60
 
     @property
     def _auth_header(self) -> Dict[str, str]:
@@ -70,23 +82,23 @@ class AtmeexApi:
         return {"Authorization": f"{self._token_type} {self._access_token}"}
 
     async def _login_if_needed(self) -> None:
-        """Логинимся, если ещё нет токена."""
-        if self._access_token:
+        """Логинимся, если ещё нет токена или он протух."""
+        if self._token_is_valid():
             return
 
         async with self._lock:
-            if self._access_token:
+            if self._token_is_valid():
                 return
 
             url = f"{API_BASE}/auth/signin"
             payload = {
                 "email": self._email,
                 "password": self._password,
-                # важно: именно password — иначе 422 / grant_type required
+                # важно: именно password — иначе 422 / 'grant_type field is required'
                 "grant_type": "password",
             }
 
-            _LOGGER.debug("Atmeex: signin %s", url)
+            _LOGGER.info("Atmeex: requesting new token via %s", url)
 
             try:
                 async with self._session.post(url, json=payload) as resp:
@@ -100,14 +112,24 @@ class AtmeexApi:
             except aiohttp.ClientError as err:
                 raise ApiError(f"auth/signin request error: {err}") from err
 
-            # ожидаем стандартный Laravel Passport / Sanctum формат
             self._access_token = data.get("access_token") or data.get("token")
             self._token_type = data.get("token_type") or "Bearer"
+
+            # пробуем прочитать срок жизни токена
+            expires_in = data.get("expires_in")
+            if isinstance(expires_in, (int, float)):
+                self._token_expires_at = time.time() + int(expires_in)
+            else:
+                self._token_expires_at = None
 
             if not self._access_token:
                 raise ApiError("auth/signin: no access token in response")
 
-            _LOGGER.info("Atmeex: authenticated successfully")
+            _LOGGER.info(
+                "Atmeex: authenticated, token_type=%s, expires_in=%s",
+                self._token_type,
+                expires_in,
+            )
 
     async def _request(
         self,
@@ -115,9 +137,16 @@ class AtmeexApi:
         path: str,
         *,
         json: Any | None = None,
-        retry_on_401: bool = True,
+        retry_on_auth_error: bool = True,
     ) -> Any:
-        """Базовый запрос к API с авторизацией и обработкой ошибок."""
+        """
+        Базовый запрос к API с авторизацией и обработкой ошибок.
+
+        Логика:
+        * перед запросом гарантируем валидный токен;
+        * при 401 / 403 / 500 один раз сбрасываем токен и пытаемся перелогиниться;
+        * если повторный запрос снова падает — выбрасываем ApiError.
+        """
         await self._login_if_needed()
 
         url = f"{API_BASE}{path}"
@@ -134,13 +163,26 @@ class AtmeexApi:
             ) as resp:
                 text = await resp.text()
 
-                # токен протух — пробуем перелогиниться один раз
-                if resp.status == 401 and retry_on_401:
-                    _LOGGER.warning("Atmeex: 401, refreshing token")
+                # Многие их ошибки авторизации приходят как 500 вместо 401.
+                if (
+                    resp.status in (401, 403, 500)
+                    and retry_on_auth_error
+                ):
+                    _LOGGER.warning(
+                        "Atmeex: %s %s got %s, trying to refresh token",
+                        method,
+                        path,
+                        resp.status,
+                    )
+                    # сбрасываем токен и пробуем ещё раз
                     self._access_token = None
+                    self._token_expires_at = None
                     await self._login_if_needed()
                     return await self._request(
-                        method, path, json=json, retry_on_401=False
+                        method,
+                        path,
+                        json=json,
+                        retry_on_auth_error=False,
                     )
 
                 if resp.status >= 400:
@@ -162,23 +204,6 @@ class AtmeexApi:
     async def get_devices(self) -> List[Dict[str, Any]]:
         """
         Возвращает список устройств текущего пользователя.
-
-        Сейчас API отдаёт примерно такой JSON:
-        [
-          {
-            "id": 12746,
-            "name": "...",
-            "online": true,
-            "settings": {
-              "u_pwr_on": false,
-              "u_fan_speed": 0,
-              "u_temp_room": 100,
-              "u_hum_stg": 0,
-              "u_damp_pos": 0,
-              ...
-            }
-          }, ...
-        ]
         """
         data = await self._request("GET", "/devices")
 
@@ -205,17 +230,11 @@ class AtmeexApi:
     ) -> Dict[str, Any]:
         """
         Обновление настроек устройства.
-
-        Важно: мы всегда шлём JSON с device_id + нужными u_* полями.
-        Маршрут может слегка отличаться в будущем — если сервер будет
-        отвечать 404/500, придется подправить path.
         """
         payload = {"device_id": device_id, **fields}
-        # исторически — POST /devices/{id}/settings
         path = f"/devices/{device_id}/settings"
 
         data = await self._request("POST", path, json=payload)
-        # ожидаем, что сервер вернет обновлённый settings или весь device
         return data
 
     # --- high-level операции, которые дергает climate.py ----------------
