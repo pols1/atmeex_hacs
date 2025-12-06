@@ -1,252 +1,241 @@
 from __future__ import annotations
 
+from typing import Any
+
 import logging
-from typing import Any, Dict, Optional
 
 from homeassistant.components.climate import (
     ClimateEntity,
     ClimateEntityFeature,
     HVACMode,
 )
-from homeassistant.components.climate.const import ATTR_HVAC_MODE
-from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
+from homeassistant.components.climate.const import (
+    ATTR_TARGET_TEMP_STEP,
+)
+from homeassistant.const import (
+    ATTR_TEMPERATURE,
+    UnitOfTemperature,
+)
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
     DataUpdateCoordinator,
 )
 
-from .api import AtmeexApi
-from .const import (
-    DOMAIN,
-    LOGGER as _INTEGRATION_LOGGER,
-)
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-# 7 скоростей вентилятора
-FAN_SPEEDS = ["0", "1", "2", "3", "4", "5", "6", "7"]
+HVAC_MODES = [HVACMode.HEAT, HVACMode.OFF]
 
-# Режимы работы заслонки / приточного блока
-BRIZER_SWING_MODES = [
-    "supply",          # приточная вентиляция
-    "recirculation",   # рециркуляция
-    "mixed",           # смешанный режим
-    "valve",           # приточный клапан
-]
-
-# Ступени увлажнения и соответствующие значения ползунка
-HUMIDITY_LEVELS = [0, 33, 66, 100]  # slider %
-HUMIDITY_STAGES = [0, 1, 2, 3]      # значения u_hum_stg
+# 0..3 -> 0/33/66/100
+HUM_STAGES = {
+    0: 0,
+    1: 33,
+    2: 66,
+    3: 100,
+}
 
 
-async def async_setup_entry(hass, entry, async_add_entities):
-    """Создаём климат-сущности для каждого бризера."""
-    coordinator: DataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]["coordinator"]
-    api: AtmeexApi = hass.data[DOMAIN][entry.entry_id]["api"]
+async def async_setup_entry(hass: HomeAssistant, entry, async_add_entities):
+    """Set up Atmeex climate entities from a config entry."""
+    data = hass.data[DOMAIN][entry.entry_id]
+    coordinator: DataUpdateCoordinator[list[dict[str, Any]]] = data["coordinator"]
 
     entities: list[AtmeexClimateEntity] = []
 
-    for device_id, device in coordinator.data.items():
+    for dev in coordinator.data:
+        # НЕ фильтруем по condition, используем settings + online
+        settings = dev.get("settings") or {}
+        name = dev.get("name", f"Atmeex {dev.get('id')}")
+        device_id = dev.get("id")
+
+        if device_id is None:
+            continue
+
         entities.append(
             AtmeexClimateEntity(
                 coordinator=coordinator,
-                api=api,
+                device=dev,
                 device_id=device_id,
+                name=name,
             )
         )
+
+    if not entities:
+        _LOGGER.warning("Atmeex: no devices found for climate platform")
 
     async_add_entities(entities)
 
 
 class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
-    """Климат-устройство для бризера Atmeex."""
+    """Representation of an Atmeex brizer as climate device."""
 
-    _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT]
-    _attr_fan_modes = FAN_SPEEDS
+    _attr_hvac_modes = HVAC_MODES
     _attr_min_temp = 10
     _attr_max_temp = 30
-    _attr_temperature_unit = UnitOfTemperature.CELSIUS
-    _attr_target_temperature_step = 0.5
     _attr_precision = 0.5
+    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    _attr_supported_features = (
+        ClimateEntityFeature.TARGET_TEMPERATURE
+        | ClimateEntityFeature.FAN_MODE
+    )
 
     def __init__(
         self,
-        coordinator: DataUpdateCoordinator,
-        api: AtmeexApi,
+        coordinator: DataUpdateCoordinator[list[dict[str, Any]]],
+        device: dict[str, Any],
         device_id: int,
+        name: str,
     ) -> None:
+        """Initialize."""
         super().__init__(coordinator)
-        self.api = api
-        self._device_id = int(device_id)
+        self._device_id = device_id
+        self._attr_name = name
+        self._attr_unique_id = f"atmeex_climate_{device_id}"
 
-        dev = self._device
-        self._attr_unique_id = f"atmeex_{self._device_id}"
-        self._attr_name = dev.get("name") or f"Atmeex {self._device_id}"
-        self._attr_icon = "mdi:air-purifier"
+        self._update_from_device(device)
 
-        # определяем, есть ли увлажнитель — если поле u_hum_stg присутствует
-        settings = self._settings
-        self._has_humidifier = "u_hum_stg" in settings and settings["u_hum_stg"] is not None
+    # --- HA helpers ---
 
-        supported = ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.FAN_MODE
-        # swing_mode используем под режим работы бризера (приточная / рецирк / ...)
-        supported |= ClimateEntityFeature.SWING_MODE
+    @property
+    def device_info(self) -> DeviceInfo:
+        dev = self._device_from_coordinator()
+        return DeviceInfo(
+            identifiers={(DOMAIN, str(self._device_id))},
+            name=dev.get("name", f"Atmeex {self._device_id}"),
+            manufacturer="Atmeex",
+            model=dev.get("model") or "Brizer",
+        )
+
+    def _device_from_coordinator(self) -> dict[str, Any]:
+        for d in self.coordinator.data:
+            if d.get("id") == self._device_id:
+                return d
+        return {}
+
+    def _update_from_device(self, dev: dict[str, Any]) -> None:
+        settings = dev.get("settings") or {}
+        condition = dev.get("condition") or {}
+
+        # температура в API *10
+        temp_room_raw = condition.get("temp_room") or settings.get("u_temp_room")
+        if isinstance(temp_room_raw, (int, float)):
+            self._attr_target_temperature = temp_room_raw / 10.0
+        else:
+            self._attr_target_temperature = 22.0
+
+        # текущая температура (если есть)
+        temp_in_raw = condition.get("temp_in")
+        if isinstance(temp_in_raw, (int, float)):
+            self._attr_current_temperature = temp_in_raw / 10.0
+
+        # режим включен/выключен
+        pwr_on = settings.get("u_pwr_on")
+        if pwr_on is None:
+            pwr_on = condition.get("pwr_on", 0)
+
+        self._attr_hvac_mode = HVACMode.HEAT if pwr_on else HVACMode.OFF
+
+        # скорость вентилятора 0..7 → строка
+        fan_speed = settings.get("u_fan_speed", 0)
+        self._attr_fan_mode = str(int(fan_speed))
+
+        # режимы вентилятора: 0..7
+        self._attr_fan_modes = [str(i) for i in range(0, 8)]
+
+        # влажность (текущая)
+        hum_room = condition.get("hum_room")
+        if isinstance(hum_room, (int, float)):
+            self._attr_current_humidity = int(hum_room)
+
+        # наличие увлажнителя — если прибор его поддерживает
+        hum_stage = settings.get("u_hum_stg")
+        self._has_humidifier = hum_stage is not None
+
         if self._has_humidifier:
-            supported |= ClimateEntityFeature.TARGET_HUMIDITY
-        self._attr_supported_features = supported
+            # отображаем как "Влажность" с шагами 0/33/66/100
+            stage = int(hum_stage)
+            self._attr_target_humidity = HUM_STAGES.get(stage, 0)
 
-    # ------------------------------------------------------------------
-    # Вспомогательные свойства
-    # ------------------------------------------------------------------
+    async def async_update(self) -> None:
+        """Update from coordinator data."""
+        await super().async_update()
+        self._update_from_device(self._device_from_coordinator())
 
-    @property
-    def _device(self) -> Dict[str, Any]:
-        return self.coordinator.data.get(self._device_id, {}) or {}
-
-    @property
-    def _settings(self) -> Dict[str, Any]:
-        return self._device.get("settings") or {}
-
-    # ------------------------------------------------------------------
-    # Основные свойства HA
-    # ------------------------------------------------------------------
+    # --- Свойства, которые HA читает ---
 
     @property
     def available(self) -> bool:
-        online = bool(self._device.get("online", True))
-        return online and super().available
+        dev = self._device_from_coordinator()
+        return bool(dev.get("online", True)) and super().available
 
-    @property
-    def hvac_mode(self) -> HVACMode:
-        """OFF / HEAT (подписываем как 'Вентиляция')."""
-        settings = self._settings
-        on = bool(settings.get("u_pwr_on"))
-        return HVACMode.HEAT if on else HVACMode.OFF
-
-    async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-        if hvac_mode == HVACMode.OFF:
-            await self.api.set_power(self._device_id, False)
-        else:
-            await self.api.set_power(self._device_id, True)
-
-        await self.coordinator.async_request_refresh()
-
-    @property
-    def fan_mode(self) -> Optional[str]:
-        speed = int(self._settings.get("u_fan_speed", 0))
-        speed = max(0, min(7, speed))
-        return FAN_SPEEDS[speed]
-
-    async def async_set_fan_mode(self, fan_mode: str) -> None:
-        try:
-            speed = int(fan_mode)
-        except (TypeError, ValueError):
-            _LOGGER.warning("Invalid fan_mode %s", fan_mode)
-            return
-
-        await self.api.set_fan_speed(self._device_id, speed)
-        await self.coordinator.async_request_refresh()
-
-    @property
-    def target_temperature(self) -> Optional[float]:
-        value = self._settings.get("u_temp_room")
-        if value is None:
-            # если сервер ничего не прислал — просто не показываем
-            return None
-        try:
-            return float(value) / 10.0
-        except (TypeError, ValueError):
-            return None
-
-    @property
-    def current_temperature(self) -> Optional[float]:
-        # Сейчас API по /devices не отдаёт фактическую температуру,
-        # поэтому используем целевую как приближение.
-        return self.target_temperature
+    # --- Управление температурой ---
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
-        if ATTR_TEMPERATURE not in kwargs:
-            return
-        temperature = float(kwargs[ATTR_TEMPERATURE])
-        await self.api.set_target_temperature(self._device_id, temperature)
-        await self.coordinator.async_request_refresh()
+        from .api import AtmeexApi  # локальный импорт, чтобы избежать циклов
 
-    # ------------------------------------------------------------------
-    # Увлажнитель — ползунок с 0 / 33 / 66 / 100 %
-    # ------------------------------------------------------------------
-
-    @property
-    def min_humidity(self) -> int:
-        return 0 if self._has_humidifier else None
-
-    @property
-    def max_humidity(self) -> int:
-        return 100 if self._has_humidifier else None
-
-    @property
-    def target_humidity(self) -> Optional[int]:
-        if not self._has_humidifier:
-            return None
-        stage = int(self._settings.get("u_hum_stg", 0))
-        stage = max(0, min(3, stage))
-        return HUMIDITY_LEVELS[stage]
-
-    async def async_set_humidity(self, humidity: int) -> None:
-        """Домкатываем ползунок до ближайшего из 0/33/66/100 и шлём 0..3."""
-        if not self._has_humidifier:
+        temp = kwargs.get(ATTR_TEMPERATURE)
+        if temp is None:
             return
 
-        # ищем ближайший элемент HUMIDITY_LEVELS
-        target = int(humidity)
-        diffs = [abs(target - lvl) for lvl in HUMIDITY_LEVELS]
-        stage_index = diffs.index(min(diffs))
-        stage = HUMIDITY_STAGES[stage_index]
+        data = self.hass.data[DOMAIN]
+        # берём api для текущего entry
+        api: AtmeexApi | None = None
+        for entry_id, info in data.items():
+            if info.get("coordinator") is self.coordinator:
+                api = info["api"]
+                break
 
-        await self.api.set_humidifier_stage(self._device_id, stage)
-        await self.coordinator.async_request_refresh()
-
-    # ------------------------------------------------------------------
-    # Режим работы бризера — используем swing_mode
-    # ------------------------------------------------------------------
-
-    @property
-    def swing_mode(self) -> Optional[str]:
-        idx = int(self._settings.get("u_damp_pos", 0))
-        if idx < 0 or idx >= len(BRIZER_SWING_MODES):
-            idx = 0
-        return BRIZER_SWING_MODES[idx]
-
-    @property
-    def swing_modes(self) -> list[str]:
-        return BRIZER_SWING_MODES
-
-    async def async_set_swing_mode(self, swing_mode: str) -> None:
-        if swing_mode not in BRIZER_SWING_MODES:
-            _LOGGER.warning("Unknown swing_mode %s", swing_mode)
+        if api is None:
+            _LOGGER.error("Atmeex: api not found for climate entity")
             return
 
-        idx = BRIZER_SWING_MODES.index(swing_mode)
-        await self.api.set_brizer_mode(self._device_id, idx)
+        await api.set_target_temperature(self._device_id, float(temp))
         await self.coordinator.async_request_refresh()
 
-    # ------------------------------------------------------------------
-    # Доп. атрибуты
-    # ------------------------------------------------------------------
+    # --- Управление включением / выключением ---
 
-    @property
-    def extra_state_attributes(self) -> Dict[str, Any]:
-        attrs: Dict[str, Any] = {}
-        dev = self._device
-        settings = self._settings
+    async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        from .api import AtmeexApi
 
-        attrs["online"] = dev.get("online", True)
-        attrs["device_id"] = self._device_id
-        attrs["model"] = dev.get("model")
+        data = self.hass.data[DOMAIN]
+        api: AtmeexApi | None = None
+        for entry_id, info in data.items():
+            if info.get("coordinator") is self.coordinator:
+                api = info["api"]
+                break
 
-        attrs["u_pwr_on"] = settings.get("u_pwr_on")
-        attrs["u_fan_speed"] = settings.get("u_fan_speed")
-        attrs["u_temp_room"] = settings.get("u_temp_room")
-        attrs["u_hum_stg"] = settings.get("u_hum_stg")
-        attrs["u_damp_pos"] = settings.get("u_damp_pos")
+        if api is None:
+            _LOGGER.error("Atmeex: api not found for climate entity")
+            return
 
-        return attrs
+        on = hvac_mode == HVACMode.HEAT
+        await api.set_power(self._device_id, on)
+        await self.coordinator.async_request_refresh()
+
+    # --- Управление скоростью вентилятора ---
+
+    async def async_set_fan_mode(self, fan_mode: str) -> None:
+        from .api import AtmeexApi
+
+        try:
+            speed = int(fan_mode)
+        except ValueError:
+            _LOGGER.warning("Atmeex: invalid fan_mode %s", fan_mode)
+            return
+
+        data = self.hass.data[DOMAIN]
+        api: AtmeexApi | None = None
+        for entry_id, info in data.items():
+            if info.get("coordinator") is self.coordinator:
+                api = info["api"]
+                break
+
+        if api is None:
+            _LOGGER.error("Atmeex: api not found for climate entity")
+            return
+
+        await api.set_fan_speed(self._device_id, speed)
+        await self.coordinator.async_request_refresh()
