@@ -1,51 +1,82 @@
 from __future__ import annotations
 
 import logging
-import voluptuous as vol
-from homeassistant import config_entries
-from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from typing import Any
 
-from .api import AtmeexApi, ApiError
+import voluptuous as vol
+
+from homeassistant import config_entries
+from homeassistant.core import HomeAssistant
+from homeassistant.data_entry_flow import FlowResult
+
 from .const import DOMAIN
+from .api import AtmeexApi, ApiError
 
 _LOGGER = logging.getLogger(__name__)
 
-DATA_SCHEMA = vol.Schema(
+STEP_USER_DATA_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_EMAIL): str,
-        vol.Required(CONF_PASSWORD): str,
+        vol.Required("email"): str,
+        vol.Required("password"): str,
     }
 )
 
-class AtmeexConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+
+class AtmeexCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+    """Config flow for Atmeex Cloud integration."""
+
     VERSION = 1
 
-    async def async_step_user(self, user_input=None):
+    async def async_step_user(
+        self, user_input: dict[str, Any] | None = None
+    ) -> FlowResult:
+        """Handle the initial step."""
+
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            # Use HA's shared aiohttp session
-            session = async_get_clientsession(self.hass)
-            api = AtmeexApi(session)  # <-- pass session
+            email = user_input["email"]
+            password = user_input["password"]
 
-            await api.async_init()
+            # создаём HTTP-сессию Home Assistant
+            session = self.hass.helpers.aiohttp_client.async_get_clientsession()
+
+            # НОВЫЙ конструктор: передаём session + email + password
+            api = AtmeexApi(session, email, password)
+
             try:
-                await api.login(user_input[CONF_EMAIL], user_input[CONF_PASSWORD])
-                await api.get_devices()  # sanity check
+                # проверяем, что логин / токен рабочие
+                await api.authenticate()
+                # Можно дополнительно дернуть устройства, если нужно:
+                # await api.get_devices()
 
-                # Optional: avoid duplicate entries by email
-                await self.async_set_unique_id(user_input[CONF_EMAIL])
+            except ApiError as err:
+                _LOGGER.warning("Atmeex auth failed: %s", err)
+                errors["base"] = "auth"
+
+            except Exception as err:  # pylint: disable=broad-except
+                _LOGGER.exception("Unexpected error during Atmeex auth: %s", err)
+                errors["base"] = "unknown"
+
+            else:
+                # успех — сохраняем конфиг
+                await api.close()
+
+                # уникальный ID — по e-mail
+                await self.async_set_unique_id(email)
                 self._abort_if_unique_id_configured()
 
                 return self.async_create_entry(
-                    title=user_input[CONF_EMAIL],
-                    data=user_input,
+                    title=email,
+                    data={
+                        "email": email,
+                        "password": password,
+                    },
                 )
-            except ApiError:
-                errors["base"] = "cannot_connect"
-            except Exception as err:  # log anything unexpected
-                _LOGGER.exception("Unexpected error during config flow: %s", err)
-                errors["base"] = "unknown"
 
-        return self.async_show_form(step_id="user", data_schema=DATA_SCHEMA, errors=errors)
+        # первый заход или есть ошибки — показываем форму
+        return self.async_show_form(
+            step_id="user",
+            data_schema=STEP_USER_DATA_SCHEMA,
+            errors=errors,
+        )
