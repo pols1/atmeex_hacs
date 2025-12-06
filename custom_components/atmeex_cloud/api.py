@@ -81,7 +81,7 @@ class AtmeexApi:
             return {}
         return {"Authorization": f"{self._token_type} {self._access_token}"}
 
-    async def _login_if_needed(self) -> None:
+        async def _login_if_needed(self) -> None:
         """Логинимся, если ещё нет токена или он протух."""
         if self._token_is_valid():
             return
@@ -90,11 +90,13 @@ class AtmeexApi:
             if self._token_is_valid():
                 return
 
-            url = f"{API_BASE}/auth/signin"
+            # URL авторизации — как в Thunder
+            url = f"{API_BASE}/auth/signin?format=json"
+
             payload = {
                 "email": self._email,
                 "password": self._password,
-                # важно: именно password — иначе 422 / 'grant_type field is required'
+                # важно: именно "password" — иначе 422 / "grant_type field is required"
                 "grant_type": "password",
             }
 
@@ -103,33 +105,69 @@ class AtmeexApi:
             try:
                 async with self._session.post(url, json=payload) as resp:
                     text = await resp.text()
+
                     if resp.status != 200:
                         raise ApiError(
                             f"auth/signin failed {resp.status}: {text[:300]}"
                         )
 
-                    data = await resp.json()
+                    # пробуем разобрать JSON
+                    try:
+                        data = await resp.json()
+                    except Exception:
+                        # на всякий случай логируем сырой ответ
+                        _LOGGER.error(
+                            "Atmeex auth/signin: invalid JSON, raw body=%s",
+                            text[:500],
+                        )
+                        raise ApiError(
+                            "auth/signin: invalid JSON in response"
+                        )
+
             except aiohttp.ClientError as err:
                 raise ApiError(f"auth/signin request error: {err}") from err
 
-            self._access_token = data.get("access_token") or data.get("token")
+            # Для отладки — увидишь в логе реальную структуру
+            _LOGGER.debug("Atmeex auth/signin JSON: %s", data)
+
+            # Пытаемся достать токен из разных возможных мест
+            nested = data.get("data") or {}
+
+            access_token = (
+                data.get("access_token")
+                or data.get("token")
+                or nested.get("access_token")
+                or nested.get("token")
+                or data.get("accessToken")
+                or nested.get("accessToken")
+            )
+
+            if not access_token:
+                _LOGGER.error(
+                    "Atmeex auth/signin: no access token in response JSON: %s",
+                    data,
+                )
+                raise ApiError("auth/signin: no access token in response")
+
+            self._access_token = access_token
             self._token_type = data.get("token_type") or "Bearer"
 
             # пробуем прочитать срок жизни токена
-            expires_in = data.get("expires_in")
+            expires_in = (
+                data.get("expires_in")
+                or nested.get("expires_in")
+            )
             if isinstance(expires_in, (int, float)):
                 self._token_expires_at = time.time() + int(expires_in)
             else:
                 self._token_expires_at = None
-
-            if not self._access_token:
-                raise ApiError("auth/signin: no access token in response")
 
             _LOGGER.info(
                 "Atmeex: authenticated, token_type=%s, expires_in=%s",
                 self._token_type,
                 expires_in,
             )
+
 
     async def _request(
         self,
