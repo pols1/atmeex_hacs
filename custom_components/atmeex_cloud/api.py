@@ -1,10 +1,7 @@
-from __future__ import annotations
-
-import asyncio
-import logging
 import time
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+import logging
+import asyncio
+from typing import Any, Dict, Optional
 
 import aiohttp
 
@@ -14,75 +11,42 @@ API_BASE = "https://api.iot.atmeex.com"
 
 
 class ApiError(Exception):
-    """Raised when Atmeex API call fails."""
-
-
-@dataclass
-class AtmeexDevice:
-    """Thin wrapper around device JSON for type hints."""
-
-    id: int
-    name: str
-    model: str
-    online: bool
-    raw: Dict[str, Any]
-
-    @property
-    def settings(self) -> Dict[str, Any]:
-        return self.raw.get("settings") or {}
-
-    def to_ha_dict(self) -> Dict[str, Any]:
-        """Return dict shape which coordinator will хранить в data."""
-        return {
-            "id": self.id,
-            "name": self.name,
-            "model": self.model,
-            "online": self.online,
-            "settings": self.settings,
-            "condition": self.raw.get("condition"),
-        }
+    """Ошибки API Atmeex."""
 
 
 class AtmeexApi:
-    """Работа с облаком Atmeex."""
+    """Клиент облака Atmeex — авторизация + API устройств."""
 
-    def __init__(
-        self,
-        session: aiohttp.ClientSession,
-        email: str,
-        password: str,
-    ) -> None:
+    def __init__(self, session: aiohttp.ClientSession, email: str, password: str):
         self._session = session
         self._email = email
         self._password = password
 
         self._access_token: Optional[str] = None
         self._token_type: str = "Bearer"
-        self._token_expires_at: Optional[float] = None  # unix-time
+        self._token_expires_at: Optional[float] = None
+
+        # Защита от двойных запросов на логин
         self._lock = asyncio.Lock()
 
-    # ------------------------------------------------------------------
-    # Вспомогательные методы
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------------------
+    # Helpers
+    # ---------------------------------------------------------------------
 
     def _token_is_valid(self) -> bool:
-        """Проверка, что токен ещё живой."""
+        """Проверяем — токен живой или протух."""
         if not self._access_token:
             return False
-        if self._token_expires_at is None:
-            # сервер не сказал срок жизни — считаем, что жив, пока не получим ошибку
+        if not self._token_expires_at:
             return True
-        # Обновляем токен заранее, за минуту до истечения
-        return time.time() < self._token_expires_at - 60
+        return time.time() < self._token_expires_at - 30  # небольшой запас
 
-    @property
-    def _auth_header(self) -> Dict[str, str]:
-        if not self._access_token:
-            return {}
-        return {"Authorization": f"{self._token_type} {self._access_token}"}
+    # ---------------------------------------------------------------------
+    # AUTH
+    # ---------------------------------------------------------------------
 
-        async def _login_if_needed(self) -> None:
-        """Логинимся, если ещё нет токена или он протух."""
+    async def _login_if_needed(self) -> None:
+        """Логинимся, если нет токена или он протух."""
         if self._token_is_valid():
             return
 
@@ -90,220 +54,117 @@ class AtmeexApi:
             if self._token_is_valid():
                 return
 
-            # URL авторизации — как в Thunder
             url = f"{API_BASE}/auth/signin?format=json"
 
             payload = {
                 "email": self._email,
                 "password": self._password,
-                # важно: именно "password" — иначе 422 / "grant_type field is required"
                 "grant_type": "password",
             }
 
-            _LOGGER.info("Atmeex: requesting new token via %s", url)
+            _LOGGER.info("Atmeex API: requesting new token from %s", url)
 
             try:
                 async with self._session.post(url, json=payload) as resp:
                     text = await resp.text()
 
                     if resp.status != 200:
-                        raise ApiError(
-                            f"auth/signin failed {resp.status}: {text[:300]}"
-                        )
+                        raise ApiError(f"auth/signin failed {resp.status}: {text[:300]}")
 
-                    # пробуем разобрать JSON
                     try:
                         data = await resp.json()
                     except Exception:
-                        # на всякий случай логируем сырой ответ
-                        _LOGGER.error(
-                            "Atmeex auth/signin: invalid JSON, raw body=%s",
-                            text[:500],
-                        )
-                        raise ApiError(
-                            "auth/signin: invalid JSON in response"
-                        )
+                        _LOGGER.error("Atmeex auth: invalid JSON: %s", text[:500])
+                        raise ApiError("auth/signin: invalid JSON in response")
 
             except aiohttp.ClientError as err:
                 raise ApiError(f"auth/signin request error: {err}") from err
 
-            # Для отладки — увидишь в логе реальную структуру
-            _LOGGER.debug("Atmeex auth/signin JSON: %s", data)
+            _LOGGER.debug("Atmeex auth/signin JSON response: %s", data)
 
-            # Пытаемся достать токен из разных возможных мест
             nested = data.get("data") or {}
 
+            # ищем токен в разных вариантах
             access_token = (
                 data.get("access_token")
                 or data.get("token")
+                or data.get("accessToken")
                 or nested.get("access_token")
                 or nested.get("token")
-                or data.get("accessToken")
                 or nested.get("accessToken")
             )
 
             if not access_token:
                 _LOGGER.error(
-                    "Atmeex auth/signin: no access token in response JSON: %s",
-                    data,
+                    "Atmeex auth error — no access token found in JSON: %s", data
                 )
                 raise ApiError("auth/signin: no access token in response")
 
             self._access_token = access_token
             self._token_type = data.get("token_type") or "Bearer"
 
-            # пробуем прочитать срок жизни токена
-            expires_in = (
-                data.get("expires_in")
-                or nested.get("expires_in")
-            )
+            expires_in = data.get("expires_in") or nested.get("expires_in")
             if isinstance(expires_in, (int, float)):
                 self._token_expires_at = time.time() + int(expires_in)
             else:
                 self._token_expires_at = None
 
             _LOGGER.info(
-                "Atmeex: authenticated, token_type=%s, expires_in=%s",
-                self._token_type,
-                expires_in,
+                "Atmeex: authenticated successfully, expires_in=%s", expires_in
             )
 
+    # ---------------------------------------------------------------------
+    # REQUEST WRAPPER
+    # ---------------------------------------------------------------------
 
-    async def _request(
-        self,
-        method: str,
-        path: str,
-        *,
-        json: Any | None = None,
-        retry_on_auth_error: bool = True,
-    ) -> Any:
-        """
-        Базовый запрос к API с авторизацией и обработкой ошибок.
-
-        Логика:
-        * перед запросом гарантируем валидный токен;
-        * при 401 / 403 / 500 один раз сбрасываем токен и пытаемся перелогиниться;
-        * если повторный запрос снова падает — выбрасываем ApiError.
-        """
+    async def _request(self, method: str, path: str, **kwargs) -> Dict[str, Any]:
         await self._login_if_needed()
 
         url = f"{API_BASE}{path}"
-        headers = {
-            "Accept": "application/json",
-            **self._auth_header,
-        }
 
-        _LOGGER.debug("Atmeex: %s %s json=%s", method, url, json)
+        headers = kwargs.pop("headers", {})
+        headers["Authorization"] = f"{self._token_type} {self._access_token}"
 
         try:
-            async with self._session.request(
-                method, url, headers=headers, json=json
-            ) as resp:
+            async with self._session.request(method, url, headers=headers, **kwargs) as resp:
                 text = await resp.text()
 
-                # Многие их ошибки авторизации приходят как 500 вместо 401.
-                if (
-                    resp.status in (401, 403, 500)
-                    and retry_on_auth_error
-                ):
-                    _LOGGER.warning(
-                        "Atmeex: %s %s got %s, trying to refresh token",
-                        method,
-                        path,
-                        resp.status,
-                    )
-                    # сбрасываем токен и пробуем ещё раз
-                    self._access_token = None
-                    self._token_expires_at = None
-                    await self._login_if_needed()
-                    return await self._request(
-                        method,
-                        path,
-                        json=json,
-                        retry_on_auth_error=False,
-                    )
-
                 if resp.status >= 400:
-                    raise ApiError(
-                        f"{method} {path} failed {resp.status}: {text[:500]}"
-                    )
+                    raise ApiError(f"{method} {path} failed {resp.status}: {text[:300]}")
 
-                if "application/json" in resp.headers.get("Content-Type", ""):
+                try:
                     return await resp.json()
+                except Exception:
+                    _LOGGER.error("Invalid JSON from %s: %s", path, text[:500])
+                    raise ApiError("invalid JSON in API response")
 
-                return text
         except aiohttp.ClientError as err:
-            raise ApiError(f"{method} {path} request error: {err}") from err
+            raise ApiError(f"Network error calling {path}: {err}") from err
 
-    # ------------------------------------------------------------------
-    # Публичные методы API
-    # ------------------------------------------------------------------
+    # ---------------------------------------------------------------------
+    # API Methods
+    # ---------------------------------------------------------------------
 
-    async def get_devices(self) -> List[Dict[str, Any]]:
-        """
-        Возвращает список устройств текущего пользователя.
-        """
-        data = await self._request("GET", "/devices")
+    async def get_devices(self) -> Any:
+        """Получаем список устройств."""
+        return await self._request("GET", "/devices")
 
-        if not isinstance(data, list):
-            raise ApiError("GET /devices: unexpected response format")
+    async def set_power(self, device_id: int, state: bool) -> Any:
+        payload = {"u_pwr_on": state}
+        return await self._request("POST", f"/devices/{device_id}/settings", json=payload)
 
-        devices: List[Dict[str, Any]] = []
-        for raw in data:
-            dev = AtmeexDevice(
-                id=int(raw["id"]),
-                name=str(raw.get("name") or f"Device {raw['id']}"),
-                model=str(raw.get("model") or "unknown"),
-                online=bool(raw.get("online")),
-                raw=raw,
-            )
-            devices.append(dev.to_ha_dict())
+    async def set_fan_speed(self, device_id: int, speed: int) -> Any:
+        payload = {"u_fan_speed": speed}
+        return await self._request("POST", f"/devices/{device_id}/settings", json=payload)
 
-        return devices
+    async def set_temp(self, device_id: int, temp: int) -> Any:
+        payload = {"u_temp_room": temp}
+        return await self._request("POST", f"/devices/{device_id}/settings", json=payload)
 
-    async def _update_settings(
-        self,
-        device_id: int,
-        **fields: Any,
-    ) -> Dict[str, Any]:
-        """
-        Обновление настроек устройства.
-        """
-        payload = {"device_id": device_id, **fields}
-        path = f"/devices/{device_id}/settings"
+    async def set_humidifier_stage(self, device_id: int, stage: int) -> Any:
+        payload = {"u_hum_stg": stage}
+        return await self._request("POST", f"/devices/{device_id}/settings", json=payload)
 
-        data = await self._request("POST", path, json=payload)
-        return data
-
-    # --- high-level операции, которые дергает climate.py ----------------
-
-    async def set_power(self, device_id: int, on: bool) -> None:
-        await self._update_settings(device_id, u_pwr_on=bool(on))
-
-    async def set_fan_speed(self, device_id: int, speed: int) -> None:
-        # 0..7, за пределами — подрежем
-        spd = max(0, min(7, int(speed)))
-        await self._update_settings(device_id, u_fan_speed=spd)
-
-    async def set_target_temperature(
-        self, device_id: int, temperature_c: float
-    ) -> None:
-        # API использует десятые доли градуса: 215 => 21.5 °C
-        value = int(round(float(temperature_c) * 10))
-        await self._update_settings(device_id, u_temp_room=value)
-
-    async def set_humidifier_stage(self, device_id: int, stage: int) -> None:
-        # 0..3 — четыре ступени увлажнения
-        stg = max(0, min(3, int(stage)))
-        await self._update_settings(device_id, u_hum_stg=stg)
-
-    async def set_brizer_mode(self, device_id: int, mode_index: int) -> None:
-        """
-        Режим приточного блока:
-        0 — приточная вентиляция
-        1 — рециркуляция
-        2 — смешанный
-        3 — приточный клапан
-        """
-        idx = max(0, min(3, int(mode_index)))
-        await self._update_settings(device_id, u_damp_pos=idx)
+    async def set_damper(self, device_id: int, pos: int) -> Any:
+        payload = {"u_damp_pos": pos}
+        return await self._request("POST", f"/devices/{device_id}/settings", json=payload)
