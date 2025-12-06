@@ -1,7 +1,18 @@
 {
   "name": "Atmeex Cloud",
+  "filename": "atmeex_cloud.zip",
+  "content_in_root": false,
   "render_readme": true,
-  "homeassistant": "2024.8.0",
-  "domains": ["climate", "fan", "select"],
-  "icon": "logo.png"
+  "hide_default_branch": true,
+  "homeassistant": "2024.10.0",
+  "hacs": "2.0.0",
+  "country": [
+    "RU"
+  ],
+  "domains": [
+    "climate",
+    "fan",
+    "select"
+  ],
+  "image": "https://raw.githubusercontent.com/pols1/atmeex_hacs/main/icon.png"
 }
