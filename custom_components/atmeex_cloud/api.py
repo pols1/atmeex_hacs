@@ -1,205 +1,176 @@
-import time
-import logging
-import asyncio
-from typing import Any, Dict, Optional
+from __future__ import annotations
 
-import aiohttp
+import logging
+from dataclasses import dataclass
+from typing import Any
+
+from aiohttp import ClientSession, ClientResponseError
 
 _LOGGER = logging.getLogger(__name__)
 
-API_BASE = "https://api.iot.atmeex.com"
+API_BASE_URL = "https://api.iot.atmeex.com"
 
 
+@dataclass
 class ApiError(Exception):
-    """Ошибки API Atmeex."""
+    message: str
+    status: int | None = None
+
+    def __str__(self) -> str:
+        return f"{self.message} (status={self.status})"
 
 
 class AtmeexApi:
-    """Клиент облака Atmeex — авторизация + API устройств."""
+    """Simple client for Atmeex Cloud API."""
 
-    def __init__(self, session: aiohttp.ClientSession, email: str, password: str):
+    def __init__(self, session: ClientSession, email: str, password: str) -> None:
         self._session = session
         self._email = email
         self._password = password
-
-        self._access_token: Optional[str] = None
+        self._access_token: str | None = None
         self._token_type: str = "Bearer"
-        self._token_expires_at: Optional[float] = None
 
-        # защита от одновременного логина
-        self._lock = asyncio.Lock()
-
-    # ---------------------------------------------------------------------
-    # Вспомогательное
-    # ---------------------------------------------------------------------
-
-    def _token_is_valid(self) -> bool:
-        """Проверяем — токен жив или протух."""
+    @property
+    def _auth_header(self) -> dict[str, str]:
         if not self._access_token:
-            return False
-        if not self._token_expires_at:
-            return True
-        # с запасом в 30 секунд
-        return time.time() < self._token_expires_at - 30
+            return {}
+        return {"Authorization": f"{self._token_type} {self._access_token}"}
 
-    # ---------------------------------------------------------------------
-    # AUTH
-    # ---------------------------------------------------------------------
+    async def sign_in(self) -> None:
+        """Authenticate and store access token."""
+        url = f"{API_BASE_URL}/auth/signin"
+        payload = {
+            "grant_type": "basic",
+            "email": self._email,
+            "password": self._password,
+        }
 
-    async def _login_if_needed(self) -> None:
-        """Логинимся, если токена нет или он протух."""
-        if self._token_is_valid():
-            return
-
-        async with self._lock:
-            # второй поток мог уже обновить токен пока мы ждали лок
-            if self._token_is_valid():
-                return
-
-            url = f"{API_BASE}/auth/signin"
-
-            # ВАЖНО: strict как в документации
-            payload = {
-                "grant_type": "basic",
-                "email": self._email,
-                "password": self._password,
-            }
-
-            headers = {
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            }
-
-            _LOGGER.info("Atmeex API: requesting new token from %s", url)
-            _LOGGER.debug("Atmeex auth payload: %s", payload)
-
-            try:
-                async with self._session.post(
-                    url, json=payload, headers=headers
-                ) as resp:
-                    text = await resp.text()
-
-                    if resp.status != 200:
-                        raise ApiError(
-                            f"auth/signin failed {resp.status}: {text[:300]}"
-                        )
-
-                    try:
-                        data = await resp.json()
-                    except Exception:
-                        _LOGGER.error("Atmeex auth: invalid JSON: %s", text[:500])
-                        raise ApiError("auth/signin: invalid JSON in response")
-
-            except aiohttp.ClientError as err:
-                raise ApiError(f"auth/signin request error: {err}") from err
-
-            _LOGGER.debug("Atmeex auth/signin JSON response: %s", data)
-
-            nested = data.get("data") or {}
-
-            # ищем токен в разных вариантах
-            access_token = (
-                data.get("access_token")
-                or data.get("token")
-                or data.get("accessToken")
-                or nested.get("access_token")
-                or nested.get("token")
-                or nested.get("accessToken")
-            )
-
-            if not access_token:
-                _LOGGER.error(
-                    "Atmeex auth error — no access token found in JSON: %s", data
-                )
-                raise ApiError("auth/signin: no access token in response")
-
-            self._access_token = access_token
-            self._token_type = data.get("token_type") or nested.get("token_type") or "Bearer"
-
-            expires_in = data.get("expires_in") or nested.get("expires_in")
-            if isinstance(expires_in, (int, float)):
-                self._token_expires_at = time.time() + int(expires_in)
-            else:
-                # если сервер не прислал срок — считаем «бессрочный» и живём до 401
-                self._token_expires_at = None
-
-            _LOGGER.info(
-                "Atmeex: authenticated successfully, expires_in=%s", expires_in
-            )
-
-    # ---------------------------------------------------------------------
-    # ОБЩИЙ ВРАППЕР ДЛЯ ЗАПРОСОВ
-    # ---------------------------------------------------------------------
-
-    async def _request(self, method: str, path: str, **kwargs) -> Dict[str, Any]:
-        """Общий метод: подтянули токен, сходили в API, разобрали JSON."""
-        await self._login_if_needed()
-
-        url = f"{API_BASE}{path}"
-
-        headers = kwargs.pop("headers", {})
-        headers.setdefault("Accept", "application/json")
-        headers.setdefault("Content-Type", "application/json")
-        headers["Authorization"] = f"{self._token_type} {self._access_token}"
-
-        _LOGGER.debug("Atmeex API request %s %s, headers=%s, kwargs=%s", method, url, headers, kwargs)
+        _LOGGER.debug("Atmeex: sign_in POST %s", url)
 
         try:
-            async with self._session.request(
-                method, url, headers=headers, **kwargs
-            ) as resp:
+            async with self._session.post(url, json=payload) as resp:
                 text = await resp.text()
+                if resp.status != 200:
+                    raise ApiError(
+                        f"auth/signin failed: {resp.status}: {text[:300]}",
+                        status=resp.status,
+                    )
+                data = await resp.json()
+        except ClientResponseError as err:
+            raise ApiError(f"auth/signin HTTP error: {err}", status=err.status) from err
+        except Exception as err:  # noqa: BLE001
+            raise ApiError(f"auth/signin unexpected error: {err}") from err
 
-                if resp.status >= 400:
-                    raise ApiError(f"{method} {path} failed {resp.status}: {text[:300]}")
+        token = data.get("access_token")
+        token_type = data.get("token_type", "Bearer")
 
-                try:
-                    data = await resp.json()
-                except Exception:
-                    _LOGGER.error("Invalid JSON from %s: %s", path, text[:500])
-                    raise ApiError("invalid JSON in API response")
+        if not token:
+            raise ApiError("auth/signin: no access token in response")
 
-                _LOGGER.debug("Atmeex API response %s %s: %s", method, path, data)
-                return data
+        self._access_token = token
+        self._token_type = token_type
+        _LOGGER.debug("Atmeex: sign_in OK, token_type=%s", token_type)
 
-        except aiohttp.ClientError as err:
-            raise ApiError(f"Network error calling {path}: {err}") from err
+    async def _ensure_token(self) -> None:
+        if not self._access_token:
+            await self.sign_in()
 
-    # ---------------------------------------------------------------------
-    # PUBLIC API METHODS
-    # ---------------------------------------------------------------------
+    async def get_devices(self) -> list[dict[str, Any]]:
+        """Return list of devices for current user."""
+        await self._ensure_token()
 
-    async def get_devices(self) -> Any:
-        """Получаем список устройств."""
-        return await self._request("GET", "/devices")
+        url = f"{API_BASE_URL}/user/devices"
+        headers = {
+            "Accept": "application/json",
+            **self._auth_header,
+        }
 
-    async def set_power(self, device_id: int, state: bool) -> Any:
-        payload = {"u_pwr_on": state}
-        return await self._request(
-            "POST", f"/devices/{device_id}/settings", json=payload
-        )
+        _LOGGER.debug("Atmeex: GET %s", url)
 
-    async def set_fan_speed(self, device_id: int, speed: int) -> Any:
-        payload = {"u_fan_speed": speed}
-        return await self._request(
-            "POST", f"/devices/{device_id}/settings", json=payload
-        )
+        try:
+            async with self._session.get(url, headers=headers) as resp:
+                text = await resp.text()
+                if resp.status == 401:
+                    # токен протух — пробуем перелогиниться один раз
+                    _LOGGER.warning("Atmeex: token expired, re-auth")
+                    self._access_token = None
+                    await self._ensure_token()
+                    return await self.get_devices()
 
-    async def set_temp(self, device_id: int, temp: int) -> Any:
-        # сервер ожидает целое, у тебя в примерах 100/150 → значит, шаг 0.5 либо просто *10
-        payload = {"u_temp_room": int(temp)}
-        return await self._request(
-            "POST", f"/devices/{device_id}/settings", json=payload
-        )
+                if resp.status != 200:
+                    raise ApiError(
+                        f"GET /user/devices failed {resp.status}: {text[:300]}",
+                        status=resp.status,
+                    )
 
-    async def set_humidifier_stage(self, device_id: int, stage: int) -> Any:
-        payload = {"u_hum_stg": int(stage)}
-        return await self._request(
-            "POST", f"/devices/{device_id}/settings", json=payload
-        )
+                data = await resp.json()
+        except ClientResponseError as err:
+            raise ApiError(f"GET /user/devices HTTP error: {err}", status=err.status) from err
+        except Exception as err:  # noqa: BLE001
+            raise ApiError(f"GET /user/devices unexpected error: {err}") from err
 
-    async def set_damper(self, device_id: int, pos: int) -> Any:
-        payload = {"u_damp_pos": int(pos)}
-        return await self._request(
-            "POST", f"/devices/{device_id}/settings", json=payload
-        )
+        if not isinstance(data, list):
+            _LOGGER.warning("Atmeex: unexpected devices payload: %s", type(data))
+            return []
+
+        return data
+
+    async def set_fan_speed(self, device_id: int, speed: int) -> None:
+        """Set fan speed (0..7)."""
+        await self._ensure_token()
+        url = f"{API_BASE_URL}/device/{device_id}/settings"
+        payload = {
+            "u_fan_speed": speed,
+        }
+
+        _LOGGER.debug("Atmeex: set_fan_speed %s -> %s", device_id, speed)
+
+        async with self._session.post(url, json=payload, headers=self._auth_header) as resp:
+            text = await resp.text()
+            if resp.status != 200:
+                raise ApiError(f"set_fan_speed {resp.status}: {text[:300]}", status=resp.status)
+
+    async def set_power(self, device_id: int, on: bool) -> None:
+        """Turn device on/off (u_pwr_on)."""
+        await self._ensure_token()
+        url = f"{API_BASE_URL}/device/{device_id}/settings"
+        payload = {
+            "u_pwr_on": on,
+        }
+
+        _LOGGER.debug("Atmeex: set_power %s -> %s", device_id, on)
+
+        async with self._session.post(url, json=payload, headers=self._auth_header) as resp:
+            text = await resp.text()
+            if resp.status != 200:
+                raise ApiError(f"set_power {resp.status}: {text[:300]}", status=resp.status)
+
+    async def set_target_temperature(self, device_id: int, temp_c: float) -> None:
+        """Set target room temperature (u_temp_room, *10)."""
+        await self._ensure_token()
+        url = f"{API_BASE_URL}/device/{device_id}/settings"
+        payload = {
+            "u_temp_room": int(round(temp_c * 10)),
+        }
+
+        _LOGGER.debug("Atmeex: set_target_temperature %s -> %s", device_id, temp_c)
+
+        async with self._session.post(url, json=payload, headers=self._auth_header) as resp:
+            text = await resp.text()
+            if resp.status != 200:
+                raise ApiError(f"set_target_temperature {resp.status}: {text[:300]}", status=resp.status)
+
+    async def set_humidity_stage(self, device_id: int, stage: int) -> None:
+        """Set humidifier stage 0..3 (u_hum_stg)."""
+        await self._ensure_token()
+        url = f"{API_BASE_URL}/device/{device_id}/settings"
+        payload = {
+            "u_hum_stg": stage,
+        }
+
+        _LOGGER.debug("Atmeex: set_humidity_stage %s -> %s", device_id, stage)
+
+        async with self._session.post(url, json=payload, headers=self._auth_header) as resp:
+            text = await resp.text()
+            if resp.status != 200:
+                raise ApiError(f"set_humidity_stage {resp.status}: {text[:300]}", status=resp.status)
