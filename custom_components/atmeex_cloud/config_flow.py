@@ -6,8 +6,8 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import DOMAIN
 from .api import AtmeexApi, ApiError
@@ -30,25 +30,23 @@ class AtmeexCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle the initial step."""
-
+        """Первый шаг мастера настройки."""
         errors: dict[str, str] = {}
 
         if user_input is not None:
             email = user_input["email"]
             password = user_input["password"]
 
-            # создаём HTTP-сессию Home Assistant
-            session = self.hass.helpers.aiohttp_client.async_get_clientsession()
+            # Правильный способ получить aiohttp-сессию в HA
+            session = async_get_clientsession(self.hass)
 
-            # НОВЫЙ конструктор: передаём session + email + password
+            # Наш API-клиент: сессия + логин/пароль
             api = AtmeexApi(session, email, password)
 
             try:
-                # проверяем, что логин / токен рабочие
-                await api.authenticate()
-                # Можно дополнительно дернуть устройства, если нужно:
-                # await api.get_devices()
+                # Проверяем логин просто вызовом /devices —
+                # внутри автоматически выполнится auth/signin и запрос.
+                await api.get_devices()
 
             except ApiError as err:
                 _LOGGER.warning("Atmeex auth failed: %s", err)
@@ -59,10 +57,7 @@ class AtmeexCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "unknown"
 
             else:
-                # успех — сохраняем конфиг
-                await api.close()
-
-                # уникальный ID — по e-mail
+                # Успех: сохраняем конфигурацию
                 await self.async_set_unique_id(email)
                 self._abort_if_unique_id_configured()
 
@@ -74,7 +69,7 @@ class AtmeexCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     },
                 )
 
-        # первый заход или есть ошибки — показываем форму
+        # Первый заход или были ошибки — показываем форму
         return self.async_show_form(
             step_id="user",
             data_schema=STEP_USER_DATA_SCHEMA,
