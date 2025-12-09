@@ -1,11 +1,11 @@
 {
   "domain": "atmeex_cloud",
   "name": "Atmeex Cloud",
-  "version": "0.3.9",
+  "version": "0.3.4",
   "config_flow": true,
   "documentation": "https://github.com/pols1/atmeex_hacs",
-  "requirements": [],
-  "dependencies": [],
+  "issue_tracker": "https://github.com/pols1/atmeex_hacs/issues",
+  "requirements": ["aiohttp>=3.9.0", "async-timeout>=4.0.3"],
   "codeowners": ["@pols1"],
   "iot_class": "cloud_polling"
 }
