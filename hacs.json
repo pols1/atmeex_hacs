@@ -1,17 +1,5 @@
 {
   "name": "Atmeex Cloud",
-  "filename": "atmeex_cloud.zip",
-  "content_in_root": false,
   "render_readme": true,
-  "hide_default_branch": true,
-  "homeassistant": "2024.10.0",
-  "hacs": "2.0.0",
-  "country": [
-    "RU"
-  ],
-  "domains": [
-    "climate",
-    "fan",
-    "select"
-  ],
+  "homeassistant": "2024.8.0"
 }
