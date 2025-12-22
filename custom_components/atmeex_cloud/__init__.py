@@ -1,109 +1,115 @@
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
-from typing import Any, Dict
+from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import AtmeexApi, ApiError
-from .const import DOMAIN, LOGGER as _INTEGRATION_LOGGER, PLATFORMS
+from .api import AtmeexApi, ApiAuthError, ApiError
+from .const import DOMAIN, PLATFORMS
 
+_LOGGER = logging.getLogger(__name__)
 
-CoordinatorData = Dict[str, Any]
+SCAN_INTERVAL = timedelta(seconds=30)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Atmeex Cloud from a config entry."""
     session = async_get_clientsession(hass)
 
-    # В config_flow мы кладём именно такие ключи
-    email: str = entry.data["email"]
-    password: str = entry.data["password"]
+    email = entry.data.get(CONF_EMAIL)
+    password = entry.data.get(CONF_PASSWORD)
+    if not email or not password:
+        raise ConfigEntryAuthFailed("Missing email/password in config entry")
 
-    api = AtmeexApi(session, email=email, password=password)
+    access_token = entry.data.get("access_token")
+    refresh_token = entry.data.get("refresh_token")
 
-    async def async_update_data() -> CoordinatorData:
-        """Fetch devices + conditions from API."""
+    def _save_tokens(tokens) -> None:
+        hass.config_entries.async_update_entry(
+            entry,
+            data={
+                **entry.data,
+                "access_token": tokens.access_token,
+                "refresh_token": tokens.refresh_token,
+            },
+        )
+
+    api = AtmeexApi(
+        session=session,
+        email=email,
+        password=password,
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_update_cb=_save_tokens,
+    )
+
+    async def async_update_data() -> dict[str, Any]:
         try:
-            raw = await api.get_devices()
+            devices = await api.get_devices(with_condition=True)
+        except ApiAuthError as err:
+            raise ConfigEntryAuthFailed(str(err)) from err
         except ApiError as err:
-            _INTEGRATION_LOGGER.error("Atmeex: error fetching devices: %s", err)
-            raise
+            raise UpdateFailed(str(err)) from err
+        except Exception as err:
+            raise UpdateFailed(f"Unexpected error: {err}") from err
 
-        devices_list = []
-        states: Dict[str, Any] = {}
+        states: dict[str, Any] = {}
+        for dev in devices:
+            if isinstance(dev, dict):
+                did = dev.get("id")
+                cond = dev.get("condition")
+                if did is not None and isinstance(cond, dict):
+                    states[str(did)] = cond
 
-        # Наш api.get_devices() возвращает dict {"devices": [...], "states": {...}}
-        if isinstance(raw, dict):
-            devices_list = raw.get("devices") or []
-            if not isinstance(devices_list, list):
-                devices_list = []
-            states_raw = raw.get("states") or {}
-            if isinstance(states_raw, dict):
-                states = states_raw
-        elif isinstance(raw, list):
-            # запасной вариант, если вдруг вернёмся к старому формату
-            devices_list = raw
-
-        ids: list[int] = []
-        for dev in devices_list:
-            if not isinstance(dev, dict):
-                continue
-            did = dev.get("id")
-            try:
-                did_int = int(did)
-            except (TypeError, ValueError):
-                continue
-            ids.append(did_int)
-
-        _INTEGRATION_LOGGER.debug("Atmeex: coordinator devices = %s", ids)
-
-        return {
-            "devices": devices_list,
-            "states": states,
-        }
+        _LOGGER.debug(
+            "Atmeex: coordinator devices = %s",
+            [d.get("id") for d in devices if isinstance(d, dict)],
+        )
+        return {"devices": devices, "states": states}
 
     coordinator = DataUpdateCoordinator(
         hass,
-        _INTEGRATION_LOGGER,
-        name="Atmeex Cloud devices",
+        _LOGGER,
+        name=DOMAIN,
         update_method=async_update_data,
-        update_interval=timedelta(seconds=30),
+        update_interval=SCAN_INTERVAL,
     )
 
-    # Первый запрос к API
     await coordinator.async_config_entry_first_refresh()
 
     async def refresh_device(device_id: int | str) -> None:
-        """Принудительно обновить данные (пока общий рефреш)."""
+        """
+        Точечное обновление после команд.
+        Сейчас просто дёргаем общий refresh (быстро и надёжно).
+        """
         await coordinator.async_request_refresh()
 
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = {
         "api": api,
         "coordinator": coordinator,
-        "refresh_device": refresh_device,
+        "refresh_device": refresh_device,  # <-- ВОТ ЭТОГО НЕ ХВАТАЛО
     }
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    _INTEGRATION_LOGGER.info(
+    _LOGGER.info(
         "Atmeex Cloud: setup complete for %s, devices will be loaded by platforms",
         email,
     )
-
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Unload Atmeex Cloud config entry."""
+    """Unload a config entry."""
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
-        entry_data = hass.data.get(DOMAIN, {})
-        entry_data.pop(entry.entry_id, None)
-        if not entry_data:
-            hass.data.pop(DOMAIN, None)
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
     return unload_ok
