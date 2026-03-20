@@ -273,3 +273,12 @@ class AtmeexApi:
     async def set_humid_stage(self, device_id: int | str, stage: int) -> Any:
         stage = max(0, min(3, int(stage)))
         return await self.set_device_params(device_id, u_hum_stg=stage)
+
+    async def set_auto_mode(self, device_id: int | str, auto: bool) -> Any:
+        return await self.set_device_params(device_id, u_auto=bool(auto))
+
+    async def set_night_mode(self, device_id: int | str, night: bool) -> Any:
+        return await self.set_device_params(device_id, u_night=bool(night))
+
+    async def set_cool_mode(self, device_id: int | str, cool: bool) -> Any:
+        return await self.set_device_params(device_id, u_cool_mode=bool(cool))

@@ -11,6 +11,7 @@ LOGGER = logging.getLogger(__package__)
 # Платформы, которые поднимаем
 PLATFORMS: list[Platform] = [
     Platform.CLIMATE,
+    Platform.SENSOR,
     # если позже снова подключим отдельный fan/select, их можно сюда добавить:
     # Platform.FAN,
     # Platform.SELECT,

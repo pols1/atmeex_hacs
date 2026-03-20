@@ -7,6 +7,9 @@ from homeassistant.components.climate import (
     ClimateEntity,
     ClimateEntityFeature,
     HVACMode,
+    PRESET_NONE,
+    PRESET_AUTO,
+    PRESET_SLEEP,
 )
 from homeassistant.const import (
     UnitOfTemperature,
@@ -122,9 +125,11 @@ class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
         ClimateEntityFeature.TARGET_TEMPERATURE
         | ClimateEntityFeature.FAN_MODE
         | ClimateEntityFeature.SWING_MODE
+        | ClimateEntityFeature.PRESET_MODE
     )
 
-    _attr_hvac_modes = [HVACMode.FAN_ONLY, HVACMode.OFF]
+    _attr_hvac_modes = [HVACMode.FAN_ONLY, HVACMode.OFF, HVACMode.COOL]
+    _attr_preset_modes = [PRESET_NONE, PRESET_AUTO, PRESET_SLEEP]
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_precision = PRECISION_WHOLE
     _attr_target_temperature_step = 0.5
@@ -242,10 +247,60 @@ class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
         on = self._settings.get("u_pwr_on")
         if on is None:
             on = self._state.get("pwr_on")
-        return HVACMode.FAN_ONLY if bool(on) else HVACMode.OFF
+        
+        if not bool(on):
+            return HVACMode.OFF
+            
+        cool = self._settings.get("u_cool_mode")
+        if cool is None:
+            cool = self._state.get("cool_mode")
+            
+        if bool(cool):
+            return HVACMode.COOL
+            
+        return HVACMode.FAN_ONLY
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-        await self.api.set_power(self._device_id, hvac_mode != HVACMode.OFF)
+        if hvac_mode == HVACMode.OFF:
+            await self.api.set_power(self._device_id, False)
+        elif hvac_mode == HVACMode.COOL:
+            # Сначала включаем, затем переводим в COOL
+            await self.api.set_power(self._device_id, True)
+            await self.api.set_cool_mode(self._device_id, True)
+        else:
+            # FAN_ONLY: включаем и отключаем COOL
+            await self.api.set_power(self._device_id, True)
+            await self.api.set_cool_mode(self._device_id, False)
+        await self._refresh()
+
+    # ---------- Преднастройки (Presets) ----------
+
+    @property
+    def preset_mode(self) -> str | None:
+        is_auto = self._settings.get("u_auto")
+        if is_auto is None:
+            is_auto = self._state.get("auto", False)
+        
+        is_night = self._settings.get("u_night")
+        if is_night is None:
+            is_night = self._state.get("night", False)
+
+        if is_auto:
+            return PRESET_AUTO
+        if is_night:
+            return PRESET_SLEEP
+        return PRESET_NONE
+
+    async def async_set_preset_mode(self, preset_mode: str) -> None:
+        if preset_mode == PRESET_AUTO:
+            await self.api.set_auto_mode(self._device_id, True)
+            await self.api.set_night_mode(self._device_id, False)
+        elif preset_mode == PRESET_SLEEP:
+            await self.api.set_night_mode(self._device_id, True)
+            await self.api.set_auto_mode(self._device_id, False)
+        else: # PRESET_NONE
+            await self.api.set_auto_mode(self._device_id, False)
+            await self.api.set_night_mode(self._device_id, False)
         await self._refresh()
 
     # ---------- Температура ----------
