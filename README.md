@@ -8,15 +8,18 @@ It uses the official Atmeex Cloud REST API (https://api.iot.atmeex.com) to provi
 🧩 Originally based on the open-source integration developed by [[@anpavlov](https://github.com/anpavlov)], and extensively rewritten and expanded by Sergei Polunovskii to support modern Home Assistant releases and the current Atmeex API.
 
 ## Features
-* 	Auto-discovery of all devices linked to your Atmeex Cloud account.
-* 	Power on/off control.
-* 	Fan speed control (1–7).
-* 	Operation modes: ventilation, recirculation, mixed, and fresh-air intake.
-* 	Target temperature control (°C).
-* 	Optional humidifier control (if supported by the device).
-* 	Real-time sensors for temperature and humidity.
-* 	Online/offline status displayed directly on the climate card.
-* 	Clean asynchronous I/O using Home Assistant’s shared aiohttp client session.
+*   Auto-discovery of all devices linked to your Atmeex Cloud account.
+*   Power on/off control.
+*   Fan speed control (1–7).
+*   Operation modes: ventilation, recirculation, mixed, and fresh-air intake.
+*   Target temperature control (°C).
+*   Optional humidifier control (if supported by the device).
+*   **Climate Presets**: Support for Auto and Sleep modes.
+*   **Optional Cool Mode**: You can optionally enable cooling mode (`HVACMode.COOL`) from the integration settings if your climate complex supports it.
+*   **Rich Sensors Platform**: Real-time sensors for CO2 (`co2_ppm`), indoor temperature, outdoor temperature, and humidity.
+*   **Config Flow Re-authentication**: Seamlessly handles expired cloud tokens by prompting re-login natively in HA.
+*   Online/offline status displayed directly on the climate card.
+*   Clean asynchronous I/O using Home Assistant’s shared aiohttp client session.
 
 ## Installation
 
@@ -50,11 +53,19 @@ into your Home Assistant configuration directory:
 
 The integration uses an internal update coordinator with a 30-second polling interval.
 
+## Options
+You can configure the integration dynamically after setup:
+1. Go to Settings → Devices & Services → Atmeex Cloud.
+2. Click **Configure**.
+3. Toggle whether you want to expose the **CO2 Sensor** or enable **Cool Mode**.
+
 ## Entities
 
 Entity Type	Example	Description
-**climate**	`climate.brizer_bedroom`	Main entity: on/off, fan, temperature, mode, humidifier
-**sensor**	`sensor.brizer_bedroom_temperature`	Current room temperature
+**climate**	`climate.brizer_bedroom`	Main entity: on/off, fan, temperature, mode, presets, humidifier
+**sensor**	`sensor.brizer_bedroom_co2`	Current CO2 level (ppm) (optional)
+**sensor**	`sensor.brizer_bedroom_indoor_temperature`	Current room temperature
+**sensor**	`sensor.brizer_bedroom_outdoor_temperature`	Outdoor temperature
 **sensor**	`sensor.brizer_bedroom_humidity`	Current humidity
 **binary_sensor**	`binary_sensor.brizer_bedroom_online`	Online/offline status
 
