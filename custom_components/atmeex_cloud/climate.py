@@ -129,7 +129,6 @@ class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
         | ClimateEntityFeature.PRESET_MODE
     )
 
-    _attr_hvac_modes = [HVACMode.FAN_ONLY, HVACMode.OFF, HVACMode.COOL]
     _attr_preset_modes = [PRESET_NONE, PRESET_AUTO, PRESET_SLEEP]
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_precision = PRECISION_WHOLE
@@ -243,8 +242,15 @@ class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
     # ---------- HVAC ----------
 
     @property
+    def hvac_modes(self) -> list[HVACMode]:
+        modes = [HVACMode.FAN_ONLY, HVACMode.OFF]
+        # Проверяем настройки конфигурации
+        if self.coordinator.config_entry and self.coordinator.config_entry.options.get("enable_cool", False):
+            modes.append(HVACMode.COOL)
+        return modes
+
+    @property
     def hvac_mode(self) -> HVACMode:
-        # Смотрим u_pwr_on, если есть, иначе pwr_on из состояния
         on = self._settings.get("u_pwr_on")
         if on is None:
             on = self._state.get("pwr_on")
@@ -256,7 +262,7 @@ class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
         if cool is None:
             cool = self._state.get("cool_mode")
             
-        if bool(cool):
+        if bool(cool) and HVACMode.COOL in self.hvac_modes:
             return HVACMode.COOL
             
         return HVACMode.FAN_ONLY

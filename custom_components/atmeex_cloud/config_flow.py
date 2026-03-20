@@ -164,6 +164,10 @@ class AtmeexOptionsFlowHandler(config_entries.OptionsFlow):
                         "enable_co2",
                         default=options.get("enable_co2", True),
                     ): bool,
+                    vol.Optional(
+                        "enable_cool",
+                        default=options.get("enable_cool", False),
+                    ): bool,
                 }
             ),
         )
