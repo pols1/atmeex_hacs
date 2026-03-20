@@ -7,10 +7,11 @@ from homeassistant.components.climate import (
     ClimateEntity,
     ClimateEntityFeature,
     HVACMode,
-    PRESET_NONE,
-    PRESET_AUTO,
-    PRESET_SLEEP,
 )
+
+PRESET_NONE = "none"
+PRESET_AUTO = "auto"
+PRESET_SLEEP = "sleep"
 from homeassistant.const import (
     UnitOfTemperature,
     ATTR_TEMPERATURE,
