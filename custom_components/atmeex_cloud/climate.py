@@ -383,8 +383,8 @@ class AtmeexClimateEntity(CoordinatorEntity, ClimateEntity):
             spd = int(spd)
 
         if isinstance(spd, int) and 1 <= spd <= 7:
-            # 1 → "1", 2 → "2" и т.д.
-            return FAN_MODES[spd]
+            # Возвращаем 1..7 напрямую как строку
+            return str(spd)
 
         return None
 
