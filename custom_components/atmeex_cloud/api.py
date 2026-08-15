@@ -57,6 +57,11 @@ class AtmeexApi:
         # чтобы не было гонок при параллельных запросах
         self._auth_lock = asyncio.Lock()
 
+    @property
+    def base_url(self) -> str:
+        """Адрес облака — нужен для внятных сообщений об ошибках."""
+        return self._base_url
+
     # ---------------------------
     # JWT helpers
     # ---------------------------

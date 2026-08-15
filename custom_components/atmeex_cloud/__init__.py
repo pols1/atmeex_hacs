@@ -4,6 +4,8 @@ import logging
 from datetime import timedelta
 from typing import Any
 
+import aiohttp
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import HomeAssistant
@@ -57,8 +59,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             raise ConfigEntryAuthFailed(str(err)) from err
         except ApiError as err:
             raise UpdateFailed(str(err)) from err
+        except TimeoutError as err:
+            # У asyncio.TimeoutError пустой str() — без явного текста в UI
+            # и в логе оставалось загадочное "Unexpected error: ".
+            raise UpdateFailed(
+                f"Облако Atmeex не ответило за отведённое время ({api.base_url})"
+            ) from err
+        except aiohttp.ClientError as err:
+            raise UpdateFailed(
+                f"Сеть до облака Atmeex недоступна: {type(err).__name__}: {err}"
+            ) from err
         except Exception as err:
-            raise UpdateFailed(f"Unexpected error: {err}") from err
+            raise UpdateFailed(f"Unexpected error: {type(err).__name__}: {err}") from err
 
         states: dict[str, Any] = {}
         for dev in devices:

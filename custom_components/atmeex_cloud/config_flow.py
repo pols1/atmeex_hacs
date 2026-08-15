@@ -45,7 +45,9 @@ class AtmeexCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         config_entry: config_entries.ConfigEntry,
     ) -> config_entries.OptionsFlow:
         """Create the options flow."""
-        return AtmeexOptionsFlowHandler(config_entry)
+        # config_entry не передаём: с HA 2024.11 ядро само проставляет
+        # OptionsFlow.config_entry, а с 2026.x у свойства убран сеттер.
+        return AtmeexOptionsFlowHandler()
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -142,10 +144,6 @@ class AtmeexCloudConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 class AtmeexOptionsFlowHandler(config_entries.OptionsFlow):
     """Мастер настройки опций интеграции."""
-
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
-        """Initialize options flow."""
-        self.config_entry = config_entry
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
