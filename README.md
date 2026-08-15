@@ -153,7 +153,9 @@ Until then, changes are verified against a live Home Assistant instance.
 
 ## License
 
-Distributed under the MIT License.
+Distributed under the [MIT License](LICENSE) — see the `LICENSE` file.
 
-> Note: the `LICENSE` file is not in the repository yet — add it before the next release so
-> the stated license is actually attached to the code.
+> Note on provenance: the upstream project this fork started from,
+> [anpavlov/atmeex_hacs](https://github.com/anpavlov/atmeex_hacs), does not declare a
+> license. The MIT grant here covers the code of this fork; anything still inherited from
+> upstream remains under whatever terms its author chooses to apply.
